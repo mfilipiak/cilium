@@ -529,6 +529,7 @@ __handle_nat_fwd_ipv4(struct __ctx_buff *ctx, __u32 cluster_id __maybe_unused,
 	bool snat_done = false;
 	int ret;
 
+	printk("__handle_nat_fwd_ipv4");
 	ret = nodeport_rev_dnat_fwd_ipv4(ctx, &snat_done, revdnat_only, trace, ext_err);
 	if (ret != CTX_ACT_OK || revdnat_only)
 		return ret;
@@ -558,6 +559,7 @@ handle_nat_fwd_ipv4(struct __ctx_buff *ctx, struct trace_ctx *trace,
 	bool revdnat_only = cb_nat_flags & CB_NAT_FLAGS_REVDNAT_ONLY;
 	__u32 cluster_id = ctx_load_and_clear_meta(ctx, CB_CLUSTER_ID_EGRESS);
 
+	printk("non-tail handle_nat_fwd_ipv4");
 	return __handle_nat_fwd_ipv4(ctx, cluster_id, revdnat_only, trace, ext_err);
 }
 
@@ -573,6 +575,7 @@ int tail_handle_nat_fwd_ipv4(struct __ctx_buff *ctx)
 	enum trace_point obs_point;
 	__s8 ext_err = 0;
 
+	printk("tail_handle_nat_fwd_ipv4");
 #ifdef IS_BPF_OVERLAY
 	obs_point = TRACE_TO_OVERLAY;
 #else
@@ -709,6 +712,7 @@ handle_nat_fwd(struct __ctx_buff *ctx, __u32 cluster_id, __be16 proto,
 	switch (proto) {
 #ifdef ENABLE_IPV4
 	case bpf_htons(ETH_P_IP):
+		printk("before traced tailcall");
 		ret = invoke_traced_tailcall_if(__or4(__and(is_defined(ENABLE_IPV4),
 							    is_defined(ENABLE_IPV6)),
 						      __and(is_defined(ENABLE_HOST_FIREWALL),

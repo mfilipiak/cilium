@@ -66,6 +66,7 @@ l3_local_delivery(struct __ctx_buff *ctx, __u32 seclabel,
 		  bool from_host __maybe_unused,
 		  bool from_tunnel __maybe_unused, __u32 cluster_id __maybe_unused)
 {
+	printk("l3_local_delivery!!!");
 #ifdef LOCAL_DELIVERY_METRICS
 	/*
 	 * Special LXC case for updating egress forwarding metrics.
@@ -93,11 +94,15 @@ l3_local_delivery(struct __ctx_buff *ctx, __u32 seclabel,
 	 * will drop them.
 	 */
 	if (from_tunnel) {
+		printk("ctx_change_type");
 		ctx_change_type(ctx, PACKET_HOST);
+		printk("returning from ctx_change_type");
 		return CTX_ACT_OK;
 	}
 # endif /* !ENABLE_NODEPORT */
 
+	printk("Redirecting to %i", ep->ifindex);
+	printk("=====================");
 	return redirect_ep(ctx, ep->ifindex, from_host, from_tunnel);
 #else
 
@@ -108,6 +113,8 @@ l3_local_delivery(struct __ctx_buff *ctx, __u32 seclabel,
 	ctx_store_meta(ctx, CB_FROM_TUNNEL, from_tunnel ? 1 : 0);
 	ctx_store_meta(ctx, CB_CLUSTER_ID_INGRESS, cluster_id);
 
+	printk("returning at tail_call_policy");
+	printk("=============================");
 	return tail_call_policy(ctx, ep->lxc_id);
 #endif
 }
@@ -155,6 +162,8 @@ static __always_inline int ipv4_local_delivery(struct __ctx_buff *ctx, int l3_of
 	mac_t lxc_mac = ep->mac;
 	int ret;
 
+	printk("router_mac: %llx", router_mac);
+	printk("lxc_mac: %llx", lxc_mac);
 	cilium_dbg(ctx, DBG_LOCAL_DELIVERY, ep->lxc_id, seclabel);
 
 	ret = ipv4_l3(ctx, l3_off, (__u8 *) &router_mac, (__u8 *) &lxc_mac, ip4);

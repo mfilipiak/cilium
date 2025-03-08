@@ -41,26 +41,47 @@ int egress_gw_fib_lookup_and_redirect(struct __ctx_buff *ctx, __be32 egress_ip, 
 
 	switch (ret) {
 	case BPF_FIB_LKUP_RET_SUCCESS:
+		printk("fib lkup success");
 		break;
 	case BPF_FIB_LKUP_RET_NO_NEIGH:
+		printk("fib lkup no neigh");
 		/* Don't redirect if we can't update the L2 DMAC: */
-		if (!neigh_resolver_available())
+		if (!neigh_resolver_available()) {
+			printk("fib lkup no resolver available!");
 			return CTX_ACT_OK;
+		}
 
 		/* Don't redirect without a valid target ifindex: */
-		if (!is_defined(HAVE_FIB_IFINDEX))
+		if (!is_defined(HAVE_FIB_IFINDEX)) {
+			printk("fib lkup no target ifindex");
 			return CTX_ACT_OK;
+		}
 		break;
 	default:
+		printk("fib lkup default, drop no fib");
 		*ext_err = (__s8)ret;
 		return DROP_NO_FIB;
 	}
 
 	/* Skip redirect in to-netdev if we stay on the same iface: */
-	if (is_defined(IS_BPF_HOST) && fib_params.l.ifindex == ctx_get_ifindex(ctx))
+	printk("checking if we're staying on the same interface");
+	if (is_defined(IS_BPF_HOST) && fib_params.l.ifindex == ctx_get_ifindex(ctx)) {
+		printk("same interface");
 		return CTX_ACT_OK;
+	}
 
-	return fib_do_redirect(ctx, true, &fib_params, false, ret, &oif, ext_err);
+	printk("doing a fib_do_redirect");
+
+	fib_params.l.dmac[0] = 0xda;
+	fib_params.l.dmac[1] = 0xcf;
+	fib_params.l.dmac[2] = 0xc2;
+	fib_params.l.dmac[3] = 0x80;
+	fib_params.l.dmac[4] = 0x87;
+	fib_params.l.dmac[5] = 0x9c;
+	fib_params.l.ifindex = 6;
+	return fib_do_redirect(ctx, true, &fib_params, false, BPF_FIB_LKUP_RET_SUCCESS, &oif, ext_err);
+	// TODO
+	// return fib_do_redirect(ctx, true, &fib_params, false, ret, &oif, ext_err);
 }
 
 #ifdef ENABLE_EGRESS_GATEWAY
@@ -120,15 +141,21 @@ bool egress_gw_snat_needed(__be32 saddr __maybe_unused,
 #if defined(ENABLE_EGRESS_GATEWAY)
 	struct egress_gw_policy_entry *egress_gw_policy;
 
+	printk("looking up egress gw");
 	egress_gw_policy = lookup_ip4_egress_gw_policy(saddr, daddr);
-	if (!egress_gw_policy)
+	if (!egress_gw_policy) {
+		printk("no policy found");
 		return false;
+	}
 
 	if (egress_gw_policy->gateway_ip == EGRESS_GATEWAY_NO_GATEWAY ||
-	    egress_gw_policy->gateway_ip == EGRESS_GATEWAY_EXCLUDED_CIDR)
+	    egress_gw_policy->gateway_ip == EGRESS_GATEWAY_EXCLUDED_CIDR) {
+		printk("No match!");
 		return false;
+	}
 
 	*snat_addr = egress_gw_policy->egress_ip;
+	printk("match: %u", egress_gw_policy->egress_ip);
 	return true;
 #else
 	return false;

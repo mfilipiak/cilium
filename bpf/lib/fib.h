@@ -100,6 +100,7 @@ fib_do_redirect(struct __ctx_buff *ctx, const bool needs_l2_check,
 			 * no-op
 			 */
 		} else {
+			printk("setting oif");
 			*oif = fib_params->l.ifindex;
 		}
 	}
@@ -109,6 +110,7 @@ fib_do_redirect(struct __ctx_buff *ctx, const bool needs_l2_check,
 		bool l2_hdr_required = true;
 		int ret;
 
+		printk("l2 check");
 		ret = maybe_add_l2_hdr(ctx, *oif, &l2_hdr_required);
 		if (ret != 0)
 			return ret;
@@ -119,6 +121,7 @@ fib_do_redirect(struct __ctx_buff *ctx, const bool needs_l2_check,
 	/* determine if we are performing redirect or redirect_neigh*/
 	switch (fib_result) {
 	case BPF_FIB_LKUP_RET_SUCCESS:
+		printk("setting dmac");
 		if (eth_store_daddr(ctx, fib_params->l.dmac, 0) < 0)
 			return DROP_WRITE_ERROR;
 		if (eth_store_saddr(ctx, fib_params->l.smac, 0) < 0)
@@ -168,6 +171,7 @@ fib_do_redirect(struct __ctx_buff *ctx, const bool needs_l2_check,
 		}
 	};
 out_send:
+	printk("ctx_redirect to: %i", *oif);
 	return ctx_redirect(ctx, *oif, 0);
 }
 

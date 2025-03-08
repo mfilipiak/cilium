@@ -1,20 +1,27 @@
+#customCalls: 
+  #enabled: true
+kubeProxyReplacement: true
 debug:
   enabled: true
+  verbose: datapath
 operator:
   nodeSelector:
     kubernetes.io/os: linux
     kubernetes.io/hostname: kind-worker
 ipam:
-  mode: kubernetes
+  mode: cluster-pool
 ipv6:
   enabled: true
 ipv4:
   enabled: true
 bpf:
   monitorAggregation: none
+  masquerade: true
 livenessProbe:
   failureThreshold: 9999
 readinessProbe:
   failureThreshold: 9999
 startupProbe:
   failureThreshold: 9999
+egressGateway:
+  enabled: true

@@ -1407,6 +1407,7 @@ int cil_to_netdev(struct __ctx_buff *ctx __maybe_unused)
 	int ret = CTX_ACT_OK;
 	__s8 ext_err = 0;
 
+	printk("cil_to_netdev");
 	bpf_clear_meta(ctx);
 
 	if (magic == MARK_MAGIC_HOST || magic == MARK_MAGIC_OVERLAY)
@@ -1676,6 +1677,7 @@ int cil_to_host(struct __ctx_buff *ctx)
 	__u32 src_id = 0;
 	__s8 ext_err = 0;
 
+	printk("cil_to_host");
 	if ((magic & MARK_MAGIC_HOST_MASK) == MARK_MAGIC_ENCRYPT) {
 		ctx->mark = magic; /* CB_ENCRYPT_MAGIC */
 		src_id = ctx_load_meta(ctx, CB_ENCRYPT_IDENTITY);

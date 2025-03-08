@@ -917,13 +917,19 @@ static __always_inline int handle_ipv4_from_lxc(struct __ctx_buff *ctx, __u32 *d
 	if (1) {
 		struct remote_endpoint_info *info;
 
+
+		// TODO is this wehere we lookup the remote ip the first time?
+
+
 		info = lookup_ip4_remote_endpoint(ip4->daddr, cluster_id);
 		if (info && info->sec_identity) {
 			*dst_sec_identity = info->sec_identity;
 			tunnel_endpoint = info->tunnel_endpoint;
 			encrypt_key = get_min_encrypt_key(info->key);
 			skip_tunnel = info->flag_skip_tunnel;
+			printk("setting the tunnel enpoint: %i", tunnel_endpoint);
 		} else {
+			printk("ip4 daddr: %i", ip4->daddr);
 			*dst_sec_identity = WORLD_IPV4_ID;
 		}
 
@@ -1260,7 +1266,7 @@ skip_vtep:
 				tunnel_endpoint = ip4->daddr;
 		}
 #endif
-
+		printk("lxc encap call");
 		ret = encap_and_redirect_lxc(ctx, tunnel_endpoint, ip4->saddr,
 					     ip4->daddr, encrypt_key, &key,
 					     SECLABEL_IPV4, *dst_sec_identity, &trace);
@@ -1446,10 +1452,22 @@ int tail_handle_arp(struct __ctx_buff *ctx)
 	union macaddr smac;
 	__be32 sip;
 	__be32 tip;
+	__u8 some_mac[6] = { 0x46, 0xe8, 0x81, 0x73, 0x46, 0x53 };
 
 	/* Pass any unknown ARP requests to the Linux stack */
 	if (!arp_validate(ctx, &mac, &smac, &sip, &tip))
 		return CTX_ACT_OK;
+	printk("lxc arp responder");
+
+	// TODO TODO we need to gate this based on an endpoint ip
+	// it is ok to hack it right now like this becuase all my other workloads are up and i can just restart my netshoot container to force the updated arp`:w
+
+	
+	// note this is 2.2.2.2 which we have to set as the gateway manually in the netns
+	if(tip == 33686018) {
+		printk("lxc arp responder matched!!!");
+		memcpy(mac.addr, some_mac, sizeof(mac.addr));
+	}
 
 	/*
 	 * The endpoint is expected to make ARP requests for its gateway IP.
