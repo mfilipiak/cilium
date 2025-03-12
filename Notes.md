@@ -1,5 +1,12 @@
 # IPAM
 
+ipam_api_handler.go
+	Is the REST API
+	does an r.IPAM.AllocateNextWithExpiration
+	kubectl logs -n kube-system -l k8s-app=cilium --tail=100 -f | grep "=="
+ipam_api_handler.go: 68 goes from pool that seems like the gateway is likely just null at this point. Verified it is with Debug printing at 52
+
+
 all done in go apparently
 in pkg/ipam/node_manager.go
 
@@ -8,10 +15,21 @@ cilium-agent --debug 2>&1 | grep "==>"
 
 crd allocator has the allocators for the clouds for some reason
 
-ipam_api_handler.go: 68 goes from pool that seems like the gateway is likely just null at this point
-
 node_config.h is written to the filesystem and contains some #defines (one of which is the gateway IP)
     cilium.v4.internal.str = cilium_host's IP
+
+netlink.go#setupBaseDevice sets up the veth pair?
+
+
+pkg/client/ipam.go#IPAMAllocate
+plugins/cilium-cni/cmd/cmd.go#Add
+plugins/cilium-cni/cmd/cmd.go#configureIface
+plugins/cilium-cni/cmd/cmd.go#addIPConfigToLink
+plugins/cilium-cni/cmd/cmd.go#prepareIP (HostAddr is populated at this point)
+
+Because the prepareIP is populated, where does it get populated
+** PrepareEndpoint
+
 
 ### unexplored
 ====> look at address.go:GetNodeAddressing
