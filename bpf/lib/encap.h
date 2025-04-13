@@ -168,7 +168,7 @@ encap_and_redirect_lxc(struct __ctx_buff *ctx,
 		__u32 key_size = sizeof(tunnel_key);
 
 		// note: this is 1.1.1.1
-		if(dst_ip == 16843009) {
+		if(dst_ip == 50529027) {
 			printk("tunnel_endpoint: %i", tunnel_endpoint);
 			printk("encrypt_key: %i", encrypt_key);
 			printk("seclabel: %i", seclabel);
@@ -183,7 +183,8 @@ encap_and_redirect_lxc(struct __ctx_buff *ctx,
 			tunnel_key.tunnel_ext &= 1;
 			ctx_set_tunnel_key(ctx, &tunnel_key, key_size, BPF_F_ZERO_CSUM_TX);
 
-			return __encap_and_redirect_lxc(ctx, 67114156,
+			// TODO(refresh) this is the encoded IP of the gateway pod's node (kubectl node -o wide ip )
+			return __encap_and_redirect_lxc(ctx, 33559212,
 							encrypt_key, seclabel, dstid,
 							trace);
 

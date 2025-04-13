@@ -1399,8 +1399,10 @@ static __always_inline int __tail_handle_ipv4(struct __ctx_buff *ctx,
 		return DROP_FRAG_NOSUPPORT;
 #endif
 
-	if (unlikely(!is_valid_lxc_src_ipv4(ip4)))
-		return DROP_INVALID_SIP;
+	// The return traffic is no longer just from the pod ip
+	// TODO probably just add a guard that this check ifndef
+	// if (unlikely(!is_valid_lxc_src_ipv4(ip4)))
+	// 	return DROP_INVALID_SIP;
 
 #ifdef ENABLE_MULTICAST
 	if (mcast_ipv4_is_igmp(ip4)) {
@@ -1452,19 +1454,31 @@ int tail_handle_arp(struct __ctx_buff *ctx)
 	union macaddr smac;
 	__be32 sip;
 	__be32 tip;
-	__u8 some_mac[6] = { 0x46, 0xe8, 0x81, 0x73, 0x46, 0x53 };
+
+	// TODO there is a chance that we actually just want the arp to
+	// traverse the vxlan tunnel
+
+	// lxc side
+	// TODO(refresh)
+	// __u8 some_mac[6] = { 0x82, 0x40, 0x89, 0xc0, 0x8d, 0xa0 };
+	// __u8 some_mac[6] = { 0xE6, 0xB3, 0x11, 0xFA, 0xAB, 0x2C }; 
+	__u8 some_mac[6] = { 0x2E, 0x5F, 0xCD, 0xB2, 0x75, 0x0C }; 
+	// container side
+	// __u8 some_mac[6] = { 0xc2, 0x9a, 0xfa, 0x98, 0x25, 0xc2 };
 
 	/* Pass any unknown ARP requests to the Linux stack */
 	if (!arp_validate(ctx, &mac, &smac, &sip, &tip))
 		return CTX_ACT_OK;
-	printk("lxc arp responder");
+	printk("lxc arp responder2");
 
 	// TODO TODO we need to gate this based on an endpoint ip
 	// it is ok to hack it right now like this becuase all my other workloads are up and i can just restart my netshoot container to force the updated arp`:w
 
+	printk("arp tip: %u", tip);
 	
-	// note this is 2.2.2.2 which we have to set as the gateway manually in the netns
-	if(tip == 33686018) {
+	// TODO(refresh) Proxy IP int
+	// note this is the remote proxy pod (see ipam_api_handler.go)
+	if(tip == 3573547018) {
 		printk("lxc arp responder matched!!!");
 		memcpy(mac.addr, some_mac, sizeof(mac.addr));
 	}

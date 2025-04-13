@@ -25,6 +25,10 @@ def decode(args):
     ]
     print('.'.join(parts))
 
+def mac(args):
+    mac = args.id
+    parts = mac.split(':')
+    print(f"{{ 0x{parts[0]}, 0x{parts[1]}, 0x{parts[2]}, 0x{parts[3]}, 0x{parts[4]}, 0x{parts[5]} }};")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -44,7 +48,10 @@ if __name__ == "__main__":
     decode_parser.add_argument("id", type=int, help="uint version of the ip")
     decode_parser.set_defaults(func=decode)
 
+    mac_parser = subparser.add_parser("mac")
+    mac_parser.add_argument("id", type=str, help="mac address")
+    mac_parser.set_defaults(func=mac)
+
+    # TODO right now if no args at all are passed, it will throw and attr error
     args = parser.parse_args()
     args.func(args)
-
-

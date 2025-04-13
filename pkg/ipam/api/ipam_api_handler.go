@@ -62,7 +62,9 @@ func (r *IpamPostIpamHandler) Handle(params ipamapi.PostIpamParams) middleware.R
 	log.Debugf("==> owner %v", owner)
 	log.Debugf("==> HostAddressing %v", resp.HostAddressing.IPV4.IP)
 	if strings.HasPrefix(owner, "default/netshoot") {
-		resp.HostAddressing.IPV4.IP = "2.2.2.2"
+		// TODO(refresh) this is the ip of stc-far-proxy
+		// we would also need to fix the ARP response that is in bpf_lxc.c:tail_handle_arp
+		resp.HostAddressing.IPV4.IP = "10.0.0.213"
 	}
 
 	if ipv4Result != nil {

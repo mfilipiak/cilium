@@ -1,3 +1,10 @@
+# next steps
+
+* I was able to see SKB_DROP_REASON_TC_INGRESS while using pwru in the proxy pod
+* It seesm to get to the lxc interface with the reply and drop it there
+* CPU 05: MARK 0x0 FROM 2657 DROP: 98 bytes, reason Invalid source ip, identity 21435->unknown (DROP_INVALID_SIP)
+   ^^ cilium monitor -vv -t drop
+
 # IPAM
 
 ipam_api_handler.go
@@ -38,6 +45,7 @@ HostDevice // which = cilium_host
 GetCiliumInternalIP
 node_addressing.go:Router() returns the IP
 internalIPv4() in reconciler.go seems to return the GW ip too
+maybe on the cilium_host (cil_to_host, i should just redirect to the interface directly?)
 
 whaaaat?
 ```
@@ -72,7 +80,8 @@ tail_handle_ipv4_cont
 its ugly, but there is a lot of the CT tracking here
 #define TAIL_CT_LOOKUP4(ID, NAME, DIR, CONDITION, TARGET_ID, TARGET_NAME)	\
 
-wtf is this? bpf_lxc.c:884 
+// cilium by default uses 'THIS_INTERFACE_MAC (cilium_host i think) as the "router"
+// we are solving this with our IPAM hacks
 union macaddr router_mac = THIS_INTERFACE_MAC;
 
 starts with cil_from_container
@@ -154,6 +163,8 @@ lb.h(1584)
    * identity becomes info (from ipcache lookup) at bpf_overlay.c:383
 
 * The endpoint map are per node, so we can't lookup endpoints on remote nodes
+* When you do a redirect from a ebpf call, you go to the egress and not the ingress program
+   * so when we go from vxlan -> net (egress) -> host (egress)
 
 ???
 ?
@@ -269,6 +280,10 @@ digraph {
 ip -d link show vxlan0
 
 bpftool net list dev cilium_vxlan
+bpftool net
+
+# remove from eth0 may be necessary to get it to reload?
+bpftool link detach id {link_id of the bpftool net command}
 ```
 https://developers.redhat.com/blog/2018/10/22/introduction-to-linux-interfaces-for-virtual-networking#vxlan
 https://www.kernel.org/doc/Documentation/networking/vxlan.txt
@@ -386,3 +401,23 @@ FWMARK in `ip rule` will match a mark. im guessing they are not that predicatabl
 
 * check on the datapath for vtep support
 * consider making another vxlan (with slug of target endpoint id), that will have no bpf progs on it and should just route
+
+
+## Commands/Howtos
+
+### Update bpf
+
+```
+# mostly works for 90% of bpf
+> make kind-image-fast
+
+# sometimes necessary if attached to eth0 etc
+> docker restart kind-worker2
+```
+
+### Update rest API (e.g. IPAM)
+
+```
+> make kind-image
+> make kind-image-fast
+```

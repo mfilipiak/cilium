@@ -190,12 +190,32 @@ static __always_inline int ipv4_host_delivery(struct __ctx_buff *ctx, struct iph
 		union macaddr router_mac = THIS_INTERFACE_MAC;
 		int ret;
 
-		// printk("tunnel is: %u.%u.%u", (iphdr.daddr & 0xff0000) >> 16, (iphdr.daddr & 0xff00) >> 8, iphdr.daddr & 0xff);
-		printk("host interface delivery, rewrites the host MACs on top of the other l3 stuff?");
-		ret = ipv4_l3(ctx, ETH_HLEN, (__u8 *)&router_mac.addr,
-			      (__u8 *)&host_mac.addr, ip4);
-		if (ret != CTX_ACT_OK)
-			return ret;
+		// TODO note: this is 1.1.1.1
+		printk("3.1 whaaaaa? %u", ip4->daddr);
+		printk("3 whaaaa2? %u", ip4->saddr);
+		if(ip4->daddr != 50529027) {
+			printk("2.2 host interface delivery, rewrites the host MACs on top of the other l3 stuff?");
+			// printk("3host interface delivery, rewrites the host MACs on top of the other l3 stuff? %u", iphr.daddr);
+			ret = ipv4_l3(ctx, ETH_HLEN, (__u8 *)&router_mac.addr,
+					(__u8 *)&host_mac.addr, ip4);
+			if (ret != CTX_ACT_OK)
+				return ret;
+		}
+		else {
+			// TODO(refresh) need the lxc interface id
+			printk("redirecting directly to the lxc interface");
+			return ctx_redirect(ctx, 8, 0);
+			// printk("CTX_ACT_OK to push to the stack??");
+			// return CTX_ACT_OK;
+		}
+		// } else {
+		// 	printk("2.3 host interface delivery, rewrites the host MACs on top of the other l3 stuff?");
+		// 	// printk("3host interface delivery, rewrites the host MACs on top of the other l3 stuff? %u", iphr.daddr);
+		// 	ret = ipv4_l3(ctx, ETH_HLEN, (__u8 *)&router_mac.addr,
+		// 			(__u8 *)&host_mac.addr, ip4);
+		// 	if (ret != CTX_ACT_OK)
+		// 		return ret;
+		// }
 
 		cilium_dbg_capture(ctx, DBG_CAPTURE_DELIVERY, HOST_IFINDEX);
 		printk("redirect to %i", HOST_IFINDEX);
@@ -646,8 +666,15 @@ int cil_from_overlay(struct __ctx_buff *ctx)
 	decrypted = ((ctx->mark & MARK_MAGIC_HOST_MASK) == MARK_MAGIC_DECRYPT);
 	printk("((((((((((((((((");
 	printk("FROM overlay");
-	printk("lookup test: 03 (node 1): %p", __lookup_ip4_endpoint(67114156));
-	printk("lookup test: 04 (node 2): %p", __lookup_ip4_endpoint(50336940));
+	if(__lookup_ip4_endpoint(33559468) != 0) {
+		printk("Lookup test determined we're on 172.19.0.2");
+	} else if(__lookup_ip4_endpoint(50336684) != 0) {
+		printk("Lookup test determined we're on 172.19.0.3");
+	} else if(__lookup_ip4_endpoint(67113900) != 0) {
+		printk("Lookup test determined we're on 172.19.0.4");
+	} else {
+		printk("Lookup test was unsure which node we're on");
+	}
 
 	switch (proto) {
 #if defined(ENABLE_IPV4) || defined(ENABLE_IPV6)
@@ -821,8 +848,15 @@ int cil_to_overlay(struct __ctx_buff *ctx)
 #endif
 
 	printk("TO overlay");
-	printk("lookup test: 03 (node 1): %p", __lookup_ip4_endpoint(67114156));
-	printk("lookup test: 04 (node 2): %p", __lookup_ip4_endpoint(50336940));
+	if(__lookup_ip4_endpoint(33559468) != 0) {
+		printk("Lookup test determined we're on 172.19.0.2");
+	} else if(__lookup_ip4_endpoint(50336684) != 0) {
+		printk("Lookup test determined we're on 172.19.0.3");
+	} else if(__lookup_ip4_endpoint(67113900) != 0) {
+		printk("Lookup test determined we're on 172.19.0.4");
+	} else {
+		printk("Lookup test was unsure which node we're on");
+	}
 
 	/* We might see some unexpected packets without tunnel_key (eg. IPv6 ND).
 	 * No need to worry, the geneve/vxlan kernel drivers will drop them.
