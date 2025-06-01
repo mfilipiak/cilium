@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netshoot
+  labels:
+    app: netshoot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: netshoot
+  template:
+    metadata:
+      labels:
+        app: netshoot
+    spec:
+      nodeName: kind-worker
+      terminationGracePeriodSeconds: 3
+      containers:
+      - name: netshoot
+        image: nicolaka/netshoot:v0.13
+        command: ["sleep"]
+        args: ["infinity"]
+# We probably just need a real service that is a proxy
+# for the far side. This works, but does it buy me anything???
+#---
+#apiVersion: "cilium.io/v2"
+#kind: CiliumLocalRedirectPolicy
+#metadata:
+#  name: "lrp-addr"
+#spec:
+#  redirectFrontend:
+#    addressMatcher:
+#      ip: "169.254.169.254"
+#      toPorts:
+#        - port: "8888"
+#          protocol: TCP
+#  redirectBackend:
+#    localEndpointSelector:
+#      matchLabels:
+#        app: stc-far-proxy
+#    toPorts:
+#      - port: "3389"
+#        protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: stc-far-proxy
+  labels:
+    app: stc-far-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stc-far-proxy
+  template:
+    metadata:
+      labels:
+        app: stc-far-proxy
+      annotations:
+        io.cilium.io/ip-pool: ip-10.1.2.100
+    spec:
+      nodeName: kind-worker2
+      terminationGracePeriodSeconds: 3
+      containers:
+      - name: netshoot
+        image: nicolaka/netshoot:v0.13
+        command: ["python3"]
+        args: ["-m", "http.server", "80"]
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+            - SYS_MODULE
+          privileged: true
+---
+apiVersion: cilium.io/v2
+kind: CiliumEgressGatewayPolicy
+metadata:
+  name: egress-proxy
+spec:
+  # Specify which pods should be subject to the current policy.
+  # Multiple pod selectors can be specified.
+  selectors:
+  - podSelector:
+      matchLabels:
+        app: netshoot
+  # Specify which destination CIDR(s) this policy applies to.
+  # Multiple CIDRs can be specified.
+  destinationCIDRs:
+  - "0.0.0.0/0"
+
+  # Configure the gateway node.
+  egressGateway:
+    podSelector:
+      matchLabels:
+        app: stc-far-proxy
+    # # Specify which node should act as gateway for this policy.
+    # nodeSelector:
+    #   matchLabels:
+    #     node.kubernetes.io/name: kind-worker2

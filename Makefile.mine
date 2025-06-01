@@ -1,0 +1,45 @@
+SHELL := /bin/bash
+
+netshoot:
+	kubectl apply -f netshoot.yaml
+
+kind-refresh:
+	make kind-down ||:
+	export WORKERS=2 && make kind
+	make kind-install-cilium-fast
+	make kind-image-fast
+
+#kubectl get pod -n kube-system -l k8s-app=cilium -o wide | grep kind-worker2 | awk '{print $1}' | xargs -I {} kubectl exec -it -n kube-system {} ls
+info:
+	@echo -n "Node2 IP: " && kubectl get nodes kind-worker2 -o json | jq -r .status.addresses[0].address | xargs python3 script_ip_tool.py encode_host
+	@echo -n "Proxy IP: " && kubectl get pod -l app=stc-far-proxy -o json | jq -r .items[0].status.podIP | tee /tmp/stc-far-ip
+	@echo -n "Proxy IP: " && cat /tmp/stc-far-ip | xargs python3 script_ip_tool.py encode_host
+	@kubectl get pod -n kube-system -l k8s-app=cilium -o wide | grep kind-worker2 | awk '{print $$1}' | xargs -I {} kubectl exec -n kube-system {} -c cilium-agent -- cilium bpf endpoint list | grep `cat /tmp/stc-far-ip` | grep -Po "nodemac=\S+" | awk -F"=" '{print $$2}' | xargs python3 script_ip_tool.py mac
+	@kubectl get pod -n kube-system -l k8s-app=cilium -o wide | grep kind-worker2 | awk '{print $$1}' | xargs -I {} kubectl exec -n kube-system {} -c cilium-agent -- cilium bpf endpoint list | grep `cat /tmp/stc-far-ip` | grep -Po " mac=\S+" | awk -F"=" '{print $$2}' | xargs python3 script_ip_tool.py mac
+	@echo -n "lxc ifindex: " && kubectl get pod -n kube-system -l k8s-app=cilium -o wide | grep kind-worker2 | awk '{print $$1}' | xargs -I {} kubectl exec -n kube-system {} -c cilium-agent -- cilium bpf endpoint list | grep `cat /tmp/stc-far-ip` | grep -Po "ifindex=\S+" | awk -F"=" '{print $$2}'
+
+worker2-shell:
+	kubectl exec -it -n kube-system -c cilium-agent $$(kubectl get pod -n kube-system -l k8s-app=cilium -o wide | grep kind-worker2 | awk '{print $$1}') -- /bin/bash
+
+worker2-bpftrace:
+	kubectl exec -it -n kube-system -c cilium-agent $$(kubectl get pod -n kube-system -l k8s-app=cilium -o wide | grep kind-worker2 | awk '{print $$1}') -- bpftool prog trace | grep ping
+
+worker2-tcpdump-install:
+	kubectl exec -it -n kube-system -c cilium-agent $$(kubectl get pod -n kube-system -l k8s-app=cilium -o wide | grep kind-worker2 | awk '{print $$1}') -- apt update
+	kubectl exec -it -n kube-system -c cilium-agent $$(kubectl get pod -n kube-system -l k8s-app=cilium -o wide | grep kind-worker2 | awk '{print $$1}') -- apt install -y tcpdump wget
+	kubectl exec -it -n kube-system -c cilium-agent $$(kubectl get pod -n kube-system -l k8s-app=cilium -o wide | grep kind-worker2 | awk '{print $$1}') -- wget https://github.com/cilium/pwru/releases/download/v1.0.9/pwru-linux-amd64.tar.gz
+	kubectl exec -it -n kube-system -c cilium-agent $$(kubectl get pod -n kube-system -l k8s-app=cilium -o wide | grep kind-worker2 | awk '{print $$1}') -- tar xf pwru-linux-amd64.tar.gz
+	kubectl exec -it -n kube-system -c cilium-agent $$(kubectl get pod -n kube-system -l k8s-app=cilium -o wide | grep kind-worker2 | awk '{print $$1}') -- mv pwru /usr/local/bin
+
+proxy-shell:
+	kubectl exec -it stc-far-proxy-0 -- /bin/bash
+
+proxy-setup:
+	kubectl exec -it stc-far-proxy-0 -- wget https://github.com/cilium/pwru/releases/download/v1.0.9/pwru-linux-amd64.tar.gz
+	kubectl exec -it stc-far-proxy-0 -- tar xf pwru-linux-amd64.tar.gz 
+	kubectl exec -it stc-far-proxy-0 -- mv pwru /usr/local/bin
+	kubectl exec -it stc-far-proxy-0 -- ip tuntap add dev tun0 mode tun
+	kubectl exec -it stc-far-proxy-0 -- ip a add 3.3.3.3 dev tun0
+	kubectl exec -it stc-far-proxy-0 -- ip l set tun0 up
+
+
