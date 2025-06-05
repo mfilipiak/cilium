@@ -352,7 +352,7 @@ func newCNIRoute(r route.Route) *cniTypes.Route {
 	return rt
 }
 
-func prepareIP(ipAddr string, state *CmdState, mtu int) (*cniTypesV1.IPConfig, []*cniTypes.Route, error) {
+func prepareIP(ipAddr string, state *CmdState, mtu int, logger *logrus.Entry) (*cniTypesV1.IPConfig, []*cniTypes.Route, error) {
 	var (
 		routes []route.Route
 		gw     string
@@ -372,6 +372,8 @@ func prepareIP(ipAddr string, state *CmdState, mtu int) (*cniTypesV1.IPConfig, [
 		return nil, nil, err
 	}
 
+	logger.WithField("rule", "prepareIP").Debugf("Preparing IP %s for interface", ip)
+
 	if ip.Is6() {
 		state.IP6 = ip
 		if state.HostAddr != nil {
@@ -382,13 +384,16 @@ func prepareIP(ipAddr string, state *CmdState, mtu int) (*cniTypesV1.IPConfig, [
 			gw = connector.IPv6Gateway(state.HostAddr)
 		}
 	} else {
+		logger.WithField("rule", "prepareIP").Debugf("Preparing IPv4 %s for interface", ip)
 		state.IP4 = ip
 		if state.HostAddr != nil {
+			logger.WithField("rule", "prepareIP").Debugf("== prepareIP hostaddr not nil, %v", state.HostAddr)
 			if routes, err = connector.IPv4Routes(state.HostAddr, mtu); err != nil {
 				return nil, nil, err
 			}
 			state.IP4routes = append(state.IP4routes, routes...)
 			gw = connector.IPv4Gateway(state.HostAddr)
+			logger.WithField("rule", "prepareIP").Debugf("== prepareIP gw: %v", gw)
 		}
 	}
 
@@ -471,6 +476,7 @@ func (cmd *Cmd) Add(args *skel.CmdArgs) (err error) {
 	}
 
 	logger := loggerWithArguments(log.WithField(logfields.EventUUID, uuid.New()), args)
+	logger.Debug("==> add")
 
 	if n.EnableDebug {
 		if err := gops.Listen(gops.Options{}); err != nil {
@@ -559,9 +565,12 @@ func (cmd *Cmd) Add(args *skel.CmdArgs) (err error) {
 		var ipam *models.IPAMResponse
 		var releaseIPsFunc func(context.Context)
 		if conf.IpamMode == ipamOption.IPAMDelegatedPlugin {
+			logger.Debugf("==> delegated plugin")
 			ipam, releaseIPsFunc, err = allocateIPsWithDelegatedPlugin(context.TODO(), conf, n, args.StdinData)
 		} else {
+			logger.Debugf("==> allocateIPsWithCiliumAgent")
 			ipam, releaseIPsFunc, err = allocateIPsWithCiliumAgent(c, cniArgs, epConf.IPAMPool())
+			logger.Debugf("==> allocate response: %v", ipam.HostAddressing.IPV4.IP)
 		}
 
 		// release addresses on failure
@@ -662,7 +671,7 @@ func (cmd *Cmd) Add(args *skel.CmdArgs) (err error) {
 			ep.Addressing.IPV6PoolName = ipam.Address.IPV6PoolName
 			ep.Addressing.IPV6ExpirationUUID = ipam.IPV6.ExpirationUUID
 
-			ipConfig, routes, err = prepareIP(ep.Addressing.IPV6, state, int(conf.RouteMTU))
+			ipConfig, routes, err = prepareIP(ep.Addressing.IPV6, state, int(conf.RouteMTU), logger)
 			if err != nil {
 				return fmt.Errorf("unable to prepare IP addressing for %s: %w", ep.Addressing.IPV6, err)
 			}
@@ -677,7 +686,7 @@ func (cmd *Cmd) Add(args *skel.CmdArgs) (err error) {
 			ep.Addressing.IPV4PoolName = ipam.Address.IPV4PoolName
 			ep.Addressing.IPV4ExpirationUUID = ipam.IPV4.ExpirationUUID
 
-			ipConfig, routes, err = prepareIP(ep.Addressing.IPV4, state, int(conf.RouteMTU))
+			ipConfig, routes, err = prepareIP(ep.Addressing.IPV4, state, int(conf.RouteMTU), logger)
 			if err != nil {
 				return fmt.Errorf("unable to prepare IP addressing for %s: %w", ep.Addressing.IPV4, err)
 			}

@@ -119,6 +119,10 @@ func (config *PolicyConfig) regenerateGatewayConfig(manager *Manager) {
 
 	policyGwc := config.policyGwConfig
 
+	// for _, ep := range manager.endpoints {
+
+	// }
+
 	for _, node := range manager.nodes {
 		if !policyGwc.selectsNodeAsGateway(node) {
 			continue
