@@ -2255,6 +2255,7 @@ int tail_nodeport_rev_dnat_ingress_ipv4(struct __ctx_buff *ctx)
 	__s8 ext_err = 0;
 	int ret = 0;
 
+	printk("tail_nodeport_rev_dnat_ingress_ipv4");
 	ret = nodeport_rev_dnat_ingress_ipv4(ctx, &trace, &ext_err);
 	if (IS_ERR(ret))
 		goto drop_err;

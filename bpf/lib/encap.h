@@ -65,6 +65,8 @@ __encap_and_redirect_with_nodeid(struct __ctx_buff *ctx,
 	if (ret != CTX_ACT_REDIRECT)
 		return ret;
 
+	printk("redirect iface index: %i", ifindex);
+	printk("(((((((((((((((");
 	return ctx_redirect(ctx, ifindex, 0);
 }
 
@@ -124,15 +126,52 @@ encap_and_redirect_lxc(struct __ctx_buff *ctx,
 		       const struct trace_ctx *trace)
 {
 	struct tunnel_value *tunnel __maybe_unused;
+	struct bpf_tunnel_key tunnel_key __maybe_unused = {};
 
-	if (tunnel_endpoint)
+	printk("encap_and_redirect_lxc called");
+	if (tunnel_endpoint) {
+		printk("checking if there is a tunnel_endpoint: %i", tunnel_endpoint);
+		printk("there is, encap and redir2");
+		printk("tunnel_endpoint: %i", tunnel_endpoint);
+		printk("encrypt_key: %i", encrypt_key);
+		printk("seclabel: %i", seclabel);
+		printk("dstid: %i", dstid);
 		return __encap_and_redirect_lxc(ctx, tunnel_endpoint,
 						encrypt_key, seclabel, dstid,
 						trace);
+	}
 
+	printk("nope: %i", dst_ip);
 	tunnel = map_lookup_elem(&TUNNEL_MAP, key);
-	if (!tunnel)
+	if (!tunnel) {
+		__u32 key_size = sizeof(tunnel_key);
+
+		// note: this is 1.1.1.1
+		if(dst_ip == 50529027) {
+				printk("tunnel_endpoint: %i", tunnel_endpoint);
+				printk("encrypt_key: %i", encrypt_key);
+				printk("seclabel: %i", seclabel);
+				printk("dstid: %i", dstid);
+
+				if (unlikely(ctx_get_tunnel_key(ctx, &tunnel_key, TUNNEL_KEY_WITHOUT_SRC_IP, 0) < 0)) {
+						// TODO will it be left alone if its not there?
+						// tunnel_key = {};
+						printk("nothing set");
+				}
+
+				tunnel_key.tunnel_ext &= 1;
+				ctx_set_tunnel_key(ctx, &tunnel_key, key_size, BPF_F_ZERO_CSUM_TX);
+
+				// TODO(refresh) this is the encoded IP of the gateway pod's node (kubectl node -o wide ip )
+				return __encap_and_redirect_lxc(ctx, 33559212,
+												encrypt_key, seclabel, dstid,
+												trace);
+
+		}
+		printk("drop non-tunnel endpoint");
 		return DROP_NO_TUNNEL_ENDPOINT;
+	}
+	printk("tunnel is: %u.%u.%u", (tunnel->ip4 & 0xff0000) >> 16, (tunnel->ip4 & 0xff00) >> 8, tunnel->ip4 & 0xff);
 
 # ifdef ENABLE_IPSEC
 	if (tunnel->key) {

@@ -197,12 +197,35 @@ static __always_inline int ipv4_host_delivery(struct __ctx_buff *ctx, struct iph
 		union macaddr router_mac = THIS_INTERFACE_MAC;
 		int ret;
 
-		ret = ipv4_l3(ctx, ETH_HLEN, (__u8 *)&router_mac.addr,
-			      (__u8 *)&host_mac.addr, ip4);
-		if (ret != CTX_ACT_OK)
-			return ret;
+		// TODO note: this is 1.1.1.1
+		printk("3.1 whaaaaa? %u", ip4->daddr);
+		printk("3 whaaaa2? %u", ip4->saddr);
+		if(ip4->daddr != 50529027) {
+				printk("2.2 host interface delivery, rewrites the host MACs on top of the other l3 stuff?");
+				// printk("3host interface delivery, rewrites the host MACs on top of the other l3 stuff? %u", iphr.daddr);
+				ret = ipv4_l3(ctx, ETH_HLEN, (__u8 *)&router_mac.addr,
+								(__u8 *)&host_mac.addr, ip4);
+				if (ret != CTX_ACT_OK)
+						return ret;
+		}
+		else {
+				// TODO(refresh) need the lxc interface id
+				printk("redirecting directly to the lxc interface");
+				return ctx_redirect(ctx, 8, 0);
+				// printk("CTX_ACT_OK to push to the stack??");
+				// return CTX_ACT_OK;
+		}
+		// } else {
+		//      printk("2.3 host interface delivery, rewrites the host MACs on top of the other l3 stuff?");
+		//      // printk("3host interface delivery, rewrites the host MACs on top of the other l3 stuff? %u", iphr.daddr);
+		//      ret = ipv4_l3(ctx, ETH_HLEN, (__u8 *)&router_mac.addr,
+		//                      (__u8 *)&host_mac.addr, ip4);
+		//      if (ret != CTX_ACT_OK)
+		//              return ret;
+		// }
 
 		cilium_dbg_capture(ctx, DBG_CAPTURE_DELIVERY, CILIUM_NET_IFINDEX);
+		printk("redirect to %i", CILIUM_NET_IFINDEX);
 		return ctx_redirect(ctx, CILIUM_NET_IFINDEX, 0);
 	}
 }
@@ -313,6 +336,7 @@ static __always_inline int handle_ipv4(struct __ctx_buff *ctx,
 #endif /* ENABLE_MULTICAST */
 
 #ifdef ENABLE_NODEPORT
+	printk("nodeport in handle_ipv4----------");
 	if (!ctx_skip_nodeport(ctx)) {
 		bool punt_to_stack = false;
 
@@ -337,13 +361,17 @@ static __always_inline int handle_ipv4(struct __ctx_buff *ctx,
 	 * outer source IP to get the source node ID. After decryption this
 	 * will be the inner source IP to get the source security identity.
 	 */
+	printk("ip4 endpoint lookup");
 	info = lookup_ip4_remote_endpoint(ip4->saddr, 0);
 
 	decrypted = ((ctx->mark & MARK_MAGIC_HOST_MASK) == MARK_MAGIC_DECRYPT);
 	/* If packets are decrypted the key has already been pushed into metadata. */
 	if (decrypted) {
-		if (info)
+		printk("Packet is decrypted");
+		if (info) {
+			printk("setting the identity to info->sec_identity");
 			*identity = info->sec_identity;
+		}
 
 		cilium_dbg(ctx, info ? DBG_IP_ID_MAP_SUCCEED4 : DBG_IP_ID_MAP_FAILED4,
 			   ip4->saddr, *identity);
@@ -353,6 +381,7 @@ static __always_inline int handle_ipv4(struct __ctx_buff *ctx,
 			struct vtep_key vkey = {};
 			struct vtep_value *vtep;
 
+			printk("surprising vtep");
 			vkey.vtep_ip = ip4->saddr & VTEP_MASK;
 			vtep = map_lookup_elem(&VTEP_MAP, &vkey);
 			if (!vtep)
@@ -433,25 +462,38 @@ not_esp:
 		__u32 egress_ifindex = 0;
 		__be32 snat_addr, daddr;
 
+		printk("surprising egress gateway");
 		daddr = ip4->daddr;
 		if (egress_gw_snat_needed_hook(ip4->saddr, daddr, &snat_addr,
 					       &egress_ifindex)) {
 			if (snat_addr == EGRESS_GATEWAY_NO_EGRESS_IP)
 				return DROP_NO_EGRESS_IP;
+			printk("Needs an egress!!");
+
+			// TODO
+			// if (snat_addr == EGRESS_GATEWAY_NO_EGRESS_IP) {
+			//      printk("No egress ip, dropping");
+			//      return DROP_NO_EGRESS_IP;
+			// }
 
 			ret = ipv4_l3(ctx, ETH_HLEN, NULL, NULL, ip4);
-			if (unlikely(ret != CTX_ACT_OK))
+			if (unlikely(ret != CTX_ACT_OK)) {
+				printk("ipv4_l3 returning");
 				return ret;
+			}
 
+			printk("Needs an egress ctx_egw!!");
 			ctx_egw_done_set(ctx);
 
 			/* to-netdev@bpf_host handles SNAT, so no need to do it here. */
+			printk("fib lookup");
 			ret = egress_gw_fib_lookup_and_redirect(ctx, snat_addr,
 								daddr, egress_ifindex,
 								ext_err);
 			if (ret != CTX_ACT_OK)
 				return ret;
 
+			printk("revalidate data");
 			if (!revalidate_data(ctx, &data, &data_end, &ip4))
 				return DROP_INVALID;
 		}
@@ -460,9 +502,11 @@ not_esp:
 
 	/* Deliver to local (non-host) endpoint: */
 	ep = lookup_ip4_endpoint(ip4);
-	if (ep && !(ep->flags & ENDPOINT_MASK_HOST_DELIVERY))
+	if (ep && !(ep->flags & ENDPOINT_MASK_HOST_DELIVERY)) {
+		printk("non-host endpoint delivery");
 		return ipv4_local_delivery(ctx, ETH_HLEN, *identity, MARK_MAGIC_IDENTITY,
 					   ip4, ep, METRIC_INGRESS, false, true, 0);
+	}
 
 	ret = overlay_ingress_policy_hook(ctx, ip4, *identity, ext_err);
 	if (ret != CTX_ACT_OK)
@@ -474,6 +518,7 @@ not_esp:
 
 	set_identity_mark(ctx, *identity, MARK_MAGIC_IDENTITY);
 
+	printk("host delivery");
 	return ipv4_host_delivery(ctx, ip4);
 }
 
@@ -513,6 +558,7 @@ int tail_handle_arp(struct __ctx_buff *ctx)
 	struct vtep_value *info;
 	__u32 key_size;
 
+	printk("overlay arp responder");
 	key_size = TUNNEL_KEY_WITHOUT_SRC_IP;
 	if (unlikely(ctx_get_tunnel_key(ctx, &key, key_size, 0) < 0))
 		return send_drop_notify_error(ctx, UNKNOWN_ID, DROP_NO_TUNNEL_KEY, METRIC_INGRESS);
@@ -623,6 +669,17 @@ int cil_from_overlay(struct __ctx_buff *ctx)
  * non-IPSec mode.
  */
 	decrypted = ((ctx->mark & MARK_MAGIC_HOST_MASK) == MARK_MAGIC_DECRYPT);
+	printk("((((((((((((((((");
+	printk("FROM overlay");
+	if(__lookup_ip4_endpoint(33559468) != 0) {
+			printk("Lookup test determined we're on 172.19.0.2");
+	} else if(__lookup_ip4_endpoint(50336684) != 0) {
+			printk("Lookup test determined we're on 172.19.0.3");
+	} else if(__lookup_ip4_endpoint(67113900) != 0) {
+			printk("Lookup test determined we're on 172.19.0.4");
+	} else {
+			printk("Lookup test was unsure which node we're on");
+	}
 
 	switch (proto) {
 #if defined(ENABLE_IPV4) || defined(ENABLE_IPV6)
@@ -641,6 +698,10 @@ int cil_from_overlay(struct __ctx_buff *ctx)
 				ret = DROP_NO_TUNNEL_KEY;
 				goto out;
 			}
+			printk("tunnel remote ip: %u", key.remote_ipv4);
+			printk("tunnel local ip: %u", key.local_ipv4);
+			printk("tunnel ext: %u", key.tunnel_ext);
+			printk("tunnel label: %u", key.tunnel_label);
 			cilium_dbg(ctx, DBG_DECAP, key.tunnel_id, key.tunnel_label);
 
 			src_sec_identity = get_id_from_tunnel_id(key.tunnel_id, proto);
@@ -694,6 +755,7 @@ int cil_from_overlay(struct __ctx_buff *ctx)
 
 	case bpf_htons(ETH_P_IP):
 #ifdef ENABLE_IPV4
+		printk("egress side tail call");
 		ret = tail_call_internal(ctx, CILIUM_CALL_IPV4_FROM_OVERLAY, &ext_err);
 #else
 		ret = DROP_UNKNOWN_L3;
@@ -714,6 +776,7 @@ out:
 	if (IS_ERR(ret))
 		return send_drop_notify_error_ext(ctx, src_sec_identity, ret,
 						  ext_err, METRIC_INGRESS);
+	printk("FROM return");
 	return ret;
 }
 
@@ -760,27 +823,46 @@ int cil_to_overlay(struct __ctx_buff *ctx)
 	cluster_id = ctx_get_cluster_id_mark(ctx);
 #endif
 
+	printk("TO overlay");
+	if(__lookup_ip4_endpoint(33559468) != 0) {
+			printk("Lookup test determined we're on 172.19.0.2");
+	} else if(__lookup_ip4_endpoint(50336684) != 0) {
+			printk("Lookup test determined we're on 172.19.0.3");
+	} else if(__lookup_ip4_endpoint(67113900) != 0) {
+			printk("Lookup test determined we're on 172.19.0.4");
+	} else {
+			printk("Lookup test was unsure which node we're on");
+	}
+
 	/* We might see some unexpected packets without tunnel_key (eg. IPv6 ND).
 	 * No need to worry, the geneve/vxlan kernel drivers will drop them.
 	 */
-	if (!ctx_get_tunnel_key(ctx, &tunnel_key, TUNNEL_KEY_WITHOUT_SRC_IP, 0))
+	if (!ctx_get_tunnel_key(ctx, &tunnel_key, TUNNEL_KEY_WITHOUT_SRC_IP, 0)){
+		printk("tunnel remote ip: %u", (tunnel_key.remote_ipv4 & 0xFF));
 		src_sec_identity = get_id_from_tunnel_id(tunnel_key.tunnel_id,
 							 ctx_get_protocol(ctx));
+		printk("tunnel_id: %i", tunnel_key.tunnel_id);
+		printk("tunnel label: %i", tunnel_key.tunnel_label);
+		printk("src_sec_id: %i", src_sec_identity);
+	}
 
 	set_identity_mark(ctx, src_sec_identity, MARK_MAGIC_OVERLAY);
 
 #ifdef ENABLE_NODEPORT
 	if (snat_done) {
+		printk("nodeport::snat_done");
 		ret = CTX_ACT_OK;
 		goto out;
 	}
 
+	printk("handle_nat_fwd::before");
 	ret = handle_nat_fwd(ctx, cluster_id, src_sec_identity, proto, false, &trace, &ext_err);
 out:
 #endif
 	if (IS_ERR(ret))
 		return send_drop_notify_error_ext(ctx, src_sec_identity, ret, ext_err,
 						  METRIC_EGRESS);
+	printk("cil_to_overlay return: %i", ret);
 	return ret;
 }
 

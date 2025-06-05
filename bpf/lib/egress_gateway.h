@@ -47,8 +47,10 @@ int egress_gw_fib_lookup_and_redirect(struct __ctx_buff *ctx, __be32 egress_ip, 
 
 	switch (ret) {
 	case BPF_FIB_LKUP_RET_SUCCESS:
+		printk("fib lkup success");
 		break;
 	case BPF_FIB_LKUP_RET_NO_NEIGH:
+		printk("fib lkup no neigh");
 		/* Don't redirect if we can't update the L2 DMAC: */
 		if (!neigh_resolver_available())
 			return CTX_ACT_OK;
@@ -63,9 +65,14 @@ int egress_gw_fib_lookup_and_redirect(struct __ctx_buff *ctx, __be32 egress_ip, 
 	}
 
 	/* Skip redirect in to-netdev if we stay on the same iface: */
-	if (is_defined(IS_BPF_HOST) && fib_params.l.ifindex == ctx_get_ifindex(ctx))
+	printk("checking if we're staying on the same interface");
+	if (is_defined(IS_BPF_HOST) && fib_params.l.ifindex == ctx_get_ifindex(ctx)) {
+		printk("same interface, skipping redirect");
 		return CTX_ACT_OK;
+	}
 
+	printk("doing a fib_do_redirect");
+	printk("-----TODOTODOTODO: i was rewriting the dmac in my other branch here, if this is hit, figure out what that MAC was");
 	return fib_do_redirect(ctx, true, &fib_params, false, ret, &oif, ext_err);
 }
 
@@ -98,13 +105,17 @@ egress_gw_request_needs_redirect(struct ipv4_ct_tuple *rtuple __maybe_unused,
 #if defined(ENABLE_EGRESS_GATEWAY)
 	struct egress_gw_policy_entry *egress_gw_policy;
 
+	printk("looking up egress gw policy");
 	egress_gw_policy = lookup_ip4_egress_gw_policy(ipv4_ct_reverse_tuple_saddr(rtuple),
 						       ipv4_ct_reverse_tuple_daddr(rtuple));
-	if (!egress_gw_policy)
+	if (!egress_gw_policy) {
+		printk("no egress gw policy found");
 		return CTX_ACT_OK;
+	}
 
 	switch (egress_gw_policy->gateway_ip) {
 	case EGRESS_GATEWAY_NO_GATEWAY:
+		printk("dropping for no egress gateway");
 		/* If no gateway is found, drop the packet. */
 		return DROP_NO_EGRESS_GATEWAY;
 	case EGRESS_GATEWAY_EXCLUDED_CIDR:

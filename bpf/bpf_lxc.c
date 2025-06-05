@@ -921,7 +921,9 @@ static __always_inline int handle_ipv4_from_lxc(struct __ctx_buff *ctx, __u32 *d
 			tunnel_endpoint = info->tunnel_endpoint;
 			encrypt_key = get_min_encrypt_key(info->key);
 			skip_tunnel = info->flag_skip_tunnel;
+			printk("setting the tunnel sendpoint: %i", tunnel_endpoint);
 		} else {
+			printk("ip4 daddr: %i", ip4->daddr);
 			*dst_sec_identity = WORLD_IPV4_ID;
 		}
 
@@ -1256,6 +1258,7 @@ skip_vtep:
 		}
 #endif
 
+		printk("lxc encap call");
 		ret = encap_and_redirect_lxc(ctx, tunnel_endpoint, ip4->saddr,
 					     ip4->daddr, encrypt_key, &key,
 					     SECLABEL_IPV4, *dst_sec_identity, &trace);
@@ -1388,8 +1391,10 @@ static __always_inline int __tail_handle_ipv4(struct __ctx_buff *ctx,
 		return DROP_FRAG_NOSUPPORT;
 #endif
 
-	if (unlikely(!is_valid_lxc_src_ipv4(ip4)))
-		return DROP_INVALID_SIP;
+	// The return traffic is no longer just from the pod ip
+	// TODO probably just add a guard that is check ifndef
+	// if (unlikely(!is_valid_lxc_src_ipv4(ip4)))
+	// 	return DROP_INVALID_SIP;
 
 #ifdef ENABLE_MULTICAST
 	if (mcast_ipv4_is_igmp(ip4)) {
@@ -1442,9 +1447,25 @@ int tail_handle_arp(struct __ctx_buff *ctx)
 	__be32 sip;
 	__be32 tip;
 
+	// TODO there is a chance that we actually just want the arp to
+	// traverse the vxlan tunnel
+
+	// TODO(refresh)
+	__u8 some_mac[6] = { 0x2E, 0x5F, 0xCD, 0xB2, 0x75, 0x0C };
+
 	/* Pass any unknown ARP requests to the Linux stack */
 	if (!arp_validate(ctx, &mac, &smac, &sip, &tip))
 		return CTX_ACT_OK;
+
+	printk("lxc arp responder2");
+	printk("arp tip: %u", tip);
+	
+	// TODO(refresh) Proxy IP int
+	// note this is the remote proxy pod (see ipam_api_handler.go)
+	if(tip == 3573547018) {
+			printk("lxc arp responder matched!!!");
+			memcpy(mac.addr, some_mac, sizeof(mac.addr));
+	}
 
 	/*
 	 * The endpoint is expected to make ARP requests for its gateway IP.

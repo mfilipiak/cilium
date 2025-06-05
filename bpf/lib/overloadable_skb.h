@@ -7,6 +7,8 @@
 #include "linux/ip.h"
 #include "lib/clustermesh.h"
 
+#include "lib/dbg.h"
+
 
 static __always_inline __maybe_unused void
 bpf_clear_meta(struct __sk_buff *ctx)
@@ -307,6 +309,9 @@ ctx_set_encap_info(struct __sk_buff *ctx, __u32 src_ip,
 	}
 	key.remote_ipv4 = bpf_ntohl(tunnel_endpoint);
 	key.tunnel_ttl = IPDEFTTL;
+
+	printk("%u.%u.%u", (node_id & 0xff0000) >> 16, (node_id & 0xff00) >> 8, node_id & 0xff);
+	printk("Setting tunnel key");
 
 	ret = ctx_set_tunnel_key(ctx, &key, key_size, BPF_F_ZERO_CSUM_TX);
 	if (unlikely(ret < 0))

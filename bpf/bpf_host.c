@@ -1322,6 +1322,7 @@ int cil_from_host(struct __ctx_buff *ctx)
 	/* Traffic from the host ns going through cilium_host device must
 	 * not be subject to EDT rate-limiting.
 	 */
+    printk("cil_from_host");
 	edt_set_aggregate(ctx, 0);
 
 	if (!validate_ethertype(ctx, &proto)) {
@@ -1392,6 +1393,7 @@ int cil_to_netdev(struct __ctx_buff *ctx)
 	int ret = CTX_ACT_OK;
 	__s8 ext_err = 0;
 
+	printk("cil_to_netdev");
 	bpf_clear_meta(ctx);
 
 	if (magic == MARK_MAGIC_HOST || magic == MARK_MAGIC_OVERLAY || ctx_mark_is_wireguard(ctx))
@@ -1660,6 +1662,8 @@ int cil_to_host(struct __ctx_buff *ctx)
 	__u32 src_id = 0;
 	__s8 ext_err = 0;
 
+	printk("cil_to_host - 1.1");
+
 	/* Prefer ctx->mark when it is set to one of the expected values.
 	 * Also see https://github.com/cilium/cilium/issues/36329.
 	 */
@@ -1678,6 +1682,7 @@ int cil_to_host(struct __ctx_buff *ctx)
 		 */
 		traced = true;
 
+		printk("cil_to_host - redirect to proxy first");
 		ctx_store_meta(ctx, CB_PROXY_MAGIC, 0);
 		ret = ctx_redirect_to_proxy_first(ctx, port);
 		goto out;
@@ -1692,6 +1697,7 @@ int cil_to_host(struct __ctx_buff *ctx)
 	ctx_change_type(ctx, PACKET_HOST);
 
 # ifdef ENABLE_NODEPORT
+	printk("cil_to_host - nodeport enabled");
 	if ((ctx->mark & MARK_MAGIC_HOST_MASK) != MARK_MAGIC_ENCRYPT)
 		goto skip_ipsec_nodeport_revdnat;
 
@@ -1702,15 +1708,19 @@ int cil_to_host(struct __ctx_buff *ctx)
 	 * might never return to this program. Since IPsec is not compatible
 	 * iwth Host Firewall, this won't be an issue.
 	 */
+	printk("cil_to_host::handle_nat_fwd");
 	ret = handle_nat_fwd(ctx, 0, src_id, proto, true, &trace, &ext_err);
+	printk("cil_to_host::handle_nat_fwd didn't tail call!");
 	if (IS_ERR(ret))
 		goto out;
 
 skip_ipsec_nodeport_revdnat:
+	printk("skip label");
 # endif /* ENABLE_NODEPORT */
 
 #endif /* ENABLE_IPSEC */
 #ifdef ENABLE_HOST_FIREWALL
+	printk("cil_to_host - host firewall");
 	if (!validate_ethertype(ctx, &proto)) {
 		ret = DROP_UNSUPPORTED_L2;
 		goto out;
@@ -1733,6 +1743,7 @@ skip_ipsec_nodeport_revdnat:
 	case bpf_htons(ETH_P_IP):
 		ctx_store_meta(ctx, CB_SRC_LABEL, src_id);
 		ctx_store_meta(ctx, CB_TRACED, traced);
+		printk("cil_to_host, before policy tail call");
 		ret = tail_call_internal(ctx, CILIUM_CALL_IPV4_TO_HOST_POLICY_ONLY, &ext_err);
 		break;
 # endif
@@ -1741,10 +1752,12 @@ skip_ipsec_nodeport_revdnat:
 		break;
 	}
 #else
+    printk("setting act ok");
 	ret = CTX_ACT_OK;
 #endif /* ENABLE_HOST_FIREWALL */
 
 out:
+	printk("cil_to_host:: hit the out label");
 	if (IS_ERR(ret))
 		return send_drop_notify_error_ext(ctx, src_id, ret, ext_err,
 						  METRIC_INGRESS);
@@ -1754,6 +1767,7 @@ out:
 				  TRACE_EP_ID_UNKNOWN,
 				  CILIUM_HOST_IFINDEX, trace.reason, trace.monitor);
 
+	printk("cil_to_host:: ret");
 	return ret;
 }
 
