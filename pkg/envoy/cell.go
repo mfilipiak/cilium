@@ -16,6 +16,7 @@ import (
 
 	"github.com/cilium/cilium/pkg/crypto/certificatemanager"
 	"github.com/cilium/cilium/pkg/endpointstate"
+	envoypolicy "github.com/cilium/cilium/pkg/envoy/policy"
 	"github.com/cilium/cilium/pkg/envoy/xds"
 	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/k8s/client"
@@ -26,8 +27,8 @@ import (
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/promise"
+	"github.com/cilium/cilium/pkg/proxy/accesslog"
 	"github.com/cilium/cilium/pkg/proxy/endpoint"
-	"github.com/cilium/cilium/pkg/proxy/logger"
 	"github.com/cilium/cilium/pkg/shortener"
 	"github.com/cilium/cilium/pkg/time"
 )
@@ -44,6 +45,7 @@ var Cell = cell.Module(
 	cell.Config(secretSyncConfig{}),
 	cell.Provide(newEnvoyXDSServer),
 	cell.Provide(newEnvoyAdminClient),
+	cell.Provide(envoypolicy.NewEnvoyL7RulesTranslator),
 	cell.ProvidePrivate(newEnvoyAccessLogServer),
 	cell.ProvidePrivate(newLocalEndpointStore),
 	cell.ProvidePrivate(newArtifactCopier),
@@ -78,6 +80,7 @@ type ProxyConfig struct {
 	ProxyXffNumTrustedHopsIngress     uint32
 	ProxyXffNumTrustedHopsEgress      uint32
 	EnvoyPolicyRestoreTimeout         time.Duration
+	EnvoyHTTPUpstreamLingerTimeout    int
 }
 
 func (r ProxyConfig) Flags(flags *pflag.FlagSet) {
@@ -108,6 +111,8 @@ func (r ProxyConfig) Flags(flags *pflag.FlagSet) {
 	flags.Uint32("proxy-xff-num-trusted-hops-ingress", 0, "Number of trusted hops regarding the x-forwarded-for and related HTTP headers for the ingress L7 policy enforcement Envoy listeners.")
 	flags.Uint32("proxy-xff-num-trusted-hops-egress", 0, "Number of trusted hops regarding the x-forwarded-for and related HTTP headers for the egress L7 policy enforcement Envoy listeners.")
 	flags.Duration("envoy-policy-restore-timeout", 3*time.Minute, "Maxiumum time to wait for enpoint policy restoration before starting serving resources to Envoy")
+	flags.Int("envoy-http-upstream-linger-timeout", -1, "Time in seconds to block Envoy worker thread while an upstream HTTP connection is closing. "+
+		"If set to 0, the connection is closed immediately (with TCP RST). If set to -1, the connection is closed asynchronously in the background.")
 }
 
 type secretSyncConfig struct {
@@ -178,6 +183,7 @@ func newEnvoyXDSServer(params xdsServerParams) (XDSServer, error) {
 			proxyXffNumTrustedHopsEgress:  params.EnvoyProxyConfig.ProxyXffNumTrustedHopsEgress,
 			policyRestoreTimeout:          params.EnvoyProxyConfig.EnvoyPolicyRestoreTimeout,
 			metrics:                       params.Metrics,
+			httpLingerConfig:              params.EnvoyProxyConfig.EnvoyHTTPUpstreamLingerTimeout,
 		},
 		params.SecretManager)
 
@@ -230,7 +236,7 @@ type accessLogServerParams struct {
 
 	Lifecycle          cell.Lifecycle
 	Logger             *slog.Logger
-	AccessLogger       logger.ProxyAccessLogger
+	AccessLogger       accesslog.ProxyAccessLogger
 	LocalEndpointStore *LocalEndpointStore
 	EnvoyProxyConfig   ProxyConfig
 }
@@ -282,34 +288,40 @@ func registerEnvoyVersionCheck(params versionCheckParams) {
 		return
 	}
 
-	checker := &envoyVersionChecker{logger: params.Logger}
-
-	envoyVersionFunc := func() (string, error) {
-		return checker.getRemoteEnvoyVersion(params.EnvoyAdminClient)
-	}
-
-	if !option.Config.ExternalEnvoyProxy {
-		envoyVersionFunc = getEmbeddedEnvoyVersion
+	checker := &envoyVersionChecker{
+		logger:        params.Logger,
+		externalEnvoy: option.Config.ExternalEnvoyProxy,
+		adminClient:   params.EnvoyAdminClient,
 	}
 
 	jobGroup := params.JobRegistry.NewGroup(
 		params.Health,
+		params.Lifecycle,
 		job.WithLogger(params.Logger),
 		job.WithPprofLabels(pprof.Labels("cell", "envoy")),
 	)
-	params.Lifecycle.Append(jobGroup)
 
 	// To prevent agent restarts in case the Envoy DaemonSet isn't ready yet,
 	// version check is performed periodically and any errors are logged
 	// and reported via health reporter.
+	var previousError error
 	jobGroup.Add(job.Timer("version-check", func(_ context.Context) error {
-		if err := checker.checkEnvoyVersion(envoyVersionFunc); err != nil {
-			params.Logger.Error("Envoy: Version check failed", logfields.Error, err)
+		if err := checker.checkEnvoyVersion(); err != nil {
+			// We only log it as an error if it happens at least twice,
+			// as it is expected that during upgrade of Cilium, the Envoy version might differ
+			// for a short period of time.
+			logger := params.Logger.Info
+			if previousError != nil {
+				logger = params.Logger.Error
+			}
+			logger("Envoy: Version check failed", logfields.Error, err)
+			previousError = err
 			return err
 		}
 
+		previousError = nil
 		return nil
-	}, 5*time.Minute))
+	}, 2*time.Minute))
 }
 
 func newLocalEndpointStore() *LocalEndpointStore {
@@ -380,11 +392,10 @@ func registerSecretSyncer(params syncerParams) error {
 
 	jobGroup := params.JobRegistry.NewGroup(
 		params.Health,
+		params.Lifecycle,
 		job.WithLogger(params.Logger),
 		job.WithPprofLabels(pprof.Labels("cell", "envoy-secretsyncer")),
 	)
-
-	params.Lifecycle.Append(jobGroup)
 
 	secretSyncerLogger := params.Logger.With(logfields.Controller, "secretSyncer")
 

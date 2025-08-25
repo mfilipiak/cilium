@@ -41,10 +41,9 @@ import (
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.12.2/pkg/reconcile
 func (r *gatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	scopedLog := r.logger.With(
-		logfields.Controller, gateway,
 		logfields.Resource, req.NamespacedName,
 	)
-	scopedLog.Info("Reconciling Gateway")
+	scopedLog.InfoContext(ctx, "Reconciling Gateway")
 
 	// Step 1: Retrieve the Gateway
 	original := &gatewayv1.Gateway{}
@@ -59,7 +58,7 @@ func (r *gatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// Ignore deleting Gateway, this can happen when foregroundDeletion is enabled
 	// The reconciliation loop will automatically kick off for related Gateway resources.
 	if original.GetDeletionTimestamp() != nil {
-		scopedLog.Info("Gateway is being deleted, doing nothing")
+		scopedLog.InfoContext(ctx, "Gateway is being deleted, doing nothing")
 		return controllerruntime.Success()
 	}
 
@@ -76,7 +75,7 @@ func (r *gatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	if string(gwc.Spec.ControllerName) != controllerName {
-		scopedLog.Debug("GatewayClass does not have matching controller name, doing nothing")
+		scopedLog.DebugContext(ctx, "GatewayClass does not have matching controller name, doing nothing")
 		return controllerruntime.Success()
 	}
 
@@ -93,9 +92,11 @@ func (r *gatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	tlsRouteList := &gatewayv1alpha2.TLSRouteList{}
-	if err := r.Client.List(ctx, tlsRouteList); err != nil {
-		scopedLog.ErrorContext(ctx, "Unable to list TLSRoutes", logfields.Error, err)
-		return r.handleReconcileErrorWithStatus(ctx, err, original, gw)
+	if helpers.HasTLSRouteSupport(r.Client.Scheme()) {
+		if err := r.Client.List(ctx, tlsRouteList); err != nil {
+			scopedLog.ErrorContext(ctx, "Unable to list TLSRoutes", logfields.Error, err)
+			return r.handleReconcileErrorWithStatus(ctx, err, original, gw)
+		}
 	}
 
 	// TODO(tam): Only list the services / ServiceImports used by accepted Routes
@@ -197,7 +198,7 @@ func (r *gatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, fmt.Errorf("failed to update Gateway status: %w", err)
 	}
 
-	scopedLog.Info("Successfully reconciled Gateway")
+	scopedLog.InfoContext(ctx, "Successfully reconciled Gateway")
 	return controllerruntime.Success()
 }
 
@@ -306,6 +307,11 @@ func (r *gatewayReconciler) getGatewayClassConfig(ctx context.Context, gwc *gate
 
 func parentRefMatched(gw *gatewayv1.Gateway, listener *gatewayv1.Listener, routeNamespace string, refs []gatewayv1.ParentReference) bool {
 	for _, ref := range refs {
+		// Check if the parentRef is a Gateway before checking name and namespace
+		if !helpers.IsGateway(ref) {
+			continue
+		}
+
 		if string(ref.Name) == gw.GetName() && gw.GetNamespace() == helpers.NamespaceDerefOr(ref.Namespace, routeNamespace) {
 			if ref.SectionName == nil && ref.Port == nil {
 				return true

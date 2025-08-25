@@ -8,22 +8,20 @@
 #include "drop.h"
 #include "dbg.h"
 #include "eps.h"
-#include "maps.h"
 
-#ifdef POLICY_STATS_MAP
-
-/*
- * Both non-host and host EP programs have HOST_EP_ID defined, but only non-host EPs have LXC_ID
- * defined. Hence, if LXC_ID is defined, we are doing policy for a non-host EP, otherwise for the
- * host EP, or zero if neither is defined.
- */
-#ifdef LXC_ID
-#define EFFECTIVE_EP_ID LXC_ID
-#elif defined(HOST_EP_ID)
-#define EFFECTIVE_EP_ID HOST_EP_ID
-#else
+#ifndef EFFECTIVE_EP_ID
 #define EFFECTIVE_EP_ID 0
 #endif
+
+/* Global policy stats map */
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_PERCPU_HASH);
+	__type(key, struct policy_stats_key);
+	__type(value, struct policy_stats_value);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(max_entries, POLICY_STATS_MAP_SIZE);
+	__uint(map_flags, BPF_F_NO_COMMON_LRU);
+} cilium_policystats __section_maps_btf;
 
 static __always_inline void
 __policy_account(__u32 remote_id, __u8 egress, __u8 proto, __be16 dport, __u8 lpm_prefix_length,
@@ -56,7 +54,7 @@ __policy_account(__u32 remote_id, __u8 egress, __u8 proto, __be16 dport, __u8 lp
 	stats_key.protocol = proto;
 	stats_key.dport = dport;
 
-	value = map_lookup_elem(&POLICY_STATS_MAP, &stats_key);
+	value = map_lookup_elem(&cilium_policystats, &stats_key);
 
 	if (value) {
 		__sync_fetch_and_add(&value->packets, 1);
@@ -64,15 +62,19 @@ __policy_account(__u32 remote_id, __u8 egress, __u8 proto, __be16 dport, __u8 lp
 	} else {
 		struct policy_stats_value newval = { 1, bytes };
 
-		map_update_elem(&POLICY_STATS_MAP, &stats_key, &newval, BPF_NOEXIST);
+		map_update_elem(&cilium_policystats, &stats_key, &newval, BPF_NOEXIST);
 	}
 }
-#else
-static __always_inline void
-__policy_account(__u32 remote_id, __u8 egress, __u8 proto, __be16 dport, __u8 lpm_prefix_length,
-		 __u64 bytes)
-{}
-#endif
+
+/* Per-endpoint policy enforcement map */
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__type(key, struct policy_key);
+	__type(value, struct policy_entry);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(max_entries, POLICY_MAP_SIZE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} cilium_policy_v2 __section_maps_btf;
 
 static __always_inline int
 __policy_check(struct policy_entry *policy, const struct policy_entry *policy2, __s8 *ext_err,
@@ -296,13 +298,14 @@ policy_can_ingress(struct __ctx_buff *ctx, const void *map, __u32 src_id, __u32 
 
 static __always_inline int policy_can_ingress6(struct __ctx_buff *ctx, const void *map,
 					       const struct ipv6_ct_tuple *tuple,
-					       int l4_off,  __u32 src_id, __u32 dst_id,
+					       int l4_off, bool is_untracked_fragment,
+					       __u32 src_id, __u32 dst_id,
 					       __u8 *match_type, __u8 *audited,
 					       __s8 *ext_err, __u16 *proxy_port)
 {
 	return policy_can_ingress(ctx, map, src_id, dst_id, ETH_P_IPV6, tuple->dport,
-				 tuple->nexthdr, l4_off, false, match_type, audited,
-				 ext_err, proxy_port);
+				 tuple->nexthdr, l4_off, is_untracked_fragment,
+				 match_type, audited, ext_err, proxy_port);
 }
 
 static __always_inline int policy_can_ingress4(struct __ctx_buff *ctx,

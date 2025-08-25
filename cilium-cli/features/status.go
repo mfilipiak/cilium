@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/cilium-cli/defaults"
@@ -27,6 +29,58 @@ type perDeployNodeMetrics map[string]perNodeMetrics
 
 // perNodeMetrics maps a node name to their metrics
 type perNodeMetrics map[string][]*models.Metric
+
+const (
+	kubeSystemNamespace       = "kube-system"
+	nodeLocalDNSDaemonSetName = "node-local-dns"
+	kubeProxyDaemonSetName    = "kube-proxy"
+
+	clusterWide = "cluster-wide"
+)
+
+// detectClusterWideComponents detects cluster-wide components like kube-proxy and local-node-dns
+// and returns them as metrics with specific names
+func (s *Feature) detectClusterWideComponents(ctx context.Context) ([]*models.Metric, error) {
+	var metrics []*models.Metric
+
+	// Detect node-local-dns
+	nodeLocalDNSValue := s.detectNodeLocalDNS(ctx)
+	nodeLocalDNSMetric := &models.Metric{
+		Name:  "node_local_dns",
+		Value: nodeLocalDNSValue,
+	}
+	metrics = append(metrics, nodeLocalDNSMetric)
+
+	// Detect kube-proxy
+	kubeProxyValue := s.detectKubeProxy(ctx)
+	kubeProxyMetric := &models.Metric{
+		Name:  "kube_proxy_enabled",
+		Value: kubeProxyValue,
+	}
+	metrics = append(metrics, kubeProxyMetric)
+
+	return metrics, nil
+}
+
+// detectNodeLocalDNS detects if node-local-dns is available in the cluster
+// Returns 1 if available, 0 if not available
+func (s *Feature) detectNodeLocalDNS(ctx context.Context) float64 {
+	_, err := s.client.GetDaemonSet(ctx, kubeSystemNamespace, nodeLocalDNSDaemonSetName, metav1.GetOptions{})
+	if err != nil {
+		return 0
+	}
+	return 1
+}
+
+// detectKubeProxy detects if kube-proxy is available in the cluster
+// Returns 1 if available, 0 if not available
+func (s *Feature) detectKubeProxy(ctx context.Context) float64 {
+	_, err := s.client.GetDaemonSet(ctx, kubeSystemNamespace, kubeProxyDaemonSetName, metav1.GetOptions{})
+	if err != nil {
+		return 0
+	}
+	return 1
+}
 
 // PrintFeatureStatus prints encryption status from all/specific cilium agent pods.
 func (s *Feature) PrintFeatureStatus(ctx context.Context) error {
@@ -53,6 +107,16 @@ func (s *Feature) PrintFeatureStatus(ctx context.Context) error {
 		return err
 	}
 
+	// Detect cluster-wide components
+	clusterMetrics, err := s.detectClusterWideComponents(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Create cluster-wide metrics map for display
+	clusterNodeMap := perNodeMetrics{}
+	clusterNodeMap[clusterWide] = clusterMetrics
+
 	w := os.Stdout
 	if s.params.Outputfile != "-" {
 		w, err = os.Create(s.params.Outputfile)
@@ -64,16 +128,26 @@ func (s *Feature) PrintFeatureStatus(ctx context.Context) error {
 
 	switch s.params.Output {
 	case "tab":
-		w.WriteString("Cilium Operators\n")
-		err := printPerNodeFeatureStatus(operatorNodeMap, newTabWriter(w))
+		w.WriteString("Cluster-wide Component Detection\n")
+		err := printPerNodeFeatureStatus(clusterNodeMap, newTabWriter(w))
+		if err != nil {
+			return err
+		}
+		w.WriteString("\nCilium Operators\n")
+		err = printPerNodeFeatureStatus(operatorNodeMap, newTabWriter(w))
 		if err != nil {
 			return err
 		}
 		w.WriteString("\nCilium Agents\n")
 		return printPerNodeFeatureStatus(nodeMap, newTabWriter(w))
 	case "markdown":
-		w.WriteString("# Cilium Operators\n")
-		err := printPerNodeFeatureStatus(operatorNodeMap, newMarkdownWriter(w))
+		w.WriteString("# Cluster-wide Component Detection\n")
+		err := printPerNodeFeatureStatus(clusterNodeMap, newMarkdownWriter(w))
+		if err != nil {
+			return err
+		}
+		w.WriteString("\n# Cilium Operators\n")
+		err = printPerNodeFeatureStatus(operatorNodeMap, newMarkdownWriter(w))
 		if err != nil {
 			return err
 		}
@@ -81,6 +155,7 @@ func (s *Feature) PrintFeatureStatus(ctx context.Context) error {
 		return printPerNodeFeatureStatus(nodeMap, newMarkdownWriter(w))
 	case "json":
 		pdnm := perDeployNodeMetrics{
+			clusterWide:                     clusterNodeMap,
 			defaults.AgentDaemonSetName:     nodeMap,
 			defaults.OperatorDeploymentName: operatorNodeMap,
 		}
@@ -194,11 +269,7 @@ func parseNameAndLabels(key string) (string, string) {
 }
 
 func printPerNodeFeatureStatus(nodeMap perNodeMetrics, sp statusPrinter) error {
-	var nodesSorted []string
-	for node := range nodeMap {
-		nodesSorted = append(nodesSorted, node)
-	}
-	slices.Sort(nodesSorted)
+	nodesSorted := slices.Sorted(maps.Keys(nodeMap))
 
 	// Create header with all the nodes' names
 	err := sp.printHeader(nodesSorted)
@@ -233,11 +304,7 @@ func printPerNodeFeatureStatus(nodeMap perNodeMetrics, sp statusPrinter) error {
 		}
 	}
 
-	var metricNamesLabelsSorted []string
-	for key := range metricNamesLabels {
-		metricNamesLabelsSorted = append(metricNamesLabelsSorted, key)
-	}
-	slices.Sort(metricNamesLabelsSorted)
+	metricNamesLabelsSorted := slices.Sorted(maps.Keys(metricNamesLabels))
 
 	var previousMetricName string
 	var firstMetric bool

@@ -249,21 +249,28 @@ type tableInternal interface {
 	secondary() map[string]anyIndexer      // Secondary indexers (if any)
 	sortableMutex() internal.SortableMutex // The sortable mutex for locking the table for writing
 	anyChanges(txn WriteTxn) (anyChangeIterator, error)
-	proto() any                             // Returns the zero value of 'Obj', e.g. the prototype
+	typeName() string                       // Returns the 'Obj' type as string
 	unmarshalYAML(data []byte) (any, error) // Unmarshal the data into 'Obj'
 	numDeletedObjects(txn ReadTxn) int      // Number of objects in graveyard
-	acquired(*txn)
+	acquired(*writeTxn)
 	getAcquiredInfo() string
+	tableHeader() []string
+	tableRowAny(any) []string
 }
 
 type ReadTxn interface {
-	getTxn() *txn
+	indexReadTxn(meta TableMeta, indexPos int) (indexReadTxn, error)
+	mustIndexReadTxn(meta TableMeta, indexPos int) indexReadTxn
+	getTableEntry(meta TableMeta) *tableEntry
+	root() dbRoot
 
 	// WriteJSON writes the contents of the database as JSON.
 	WriteJSON(w io.Writer, tables ...string) error
 }
 
 type WriteTxn interface {
+	getTxn() *writeTxn
+
 	// WriteTxn is always also a ReadTxn
 	ReadTxn
 
@@ -344,6 +351,7 @@ func (i Index[Obj, Key]) fromString(s string) (index.Key, error) {
 		return index.Key{}, errFromStringNil
 	}
 	k, err := i.FromString(s)
+	k = i.encodeKey(k)
 	return k, err
 }
 
@@ -352,23 +360,30 @@ func (i Index[Obj, Key]) isUnique() bool {
 	return i.Unique
 }
 
+func (i Index[Obj, Key]) encodeKey(key []byte) []byte {
+	if !i.Unique {
+		return encodeNonUniqueBytes(key)
+	}
+	return key
+}
+
 // Query constructs a query against this index from a key.
 func (i Index[Obj, Key]) Query(key Key) Query[Obj] {
 	return Query[Obj]{
 		index: i.Name,
-		key:   i.FromKey(key),
+		key:   i.encodeKey(i.FromKey(key)),
 	}
 }
 
 func (i Index[Obj, Key]) QueryFromObject(obj Obj) Query[Obj] {
 	return Query[Obj]{
 		index: i.Name,
-		key:   i.FromObject(obj).First(),
+		key:   i.encodeKey(i.FromObject(obj).First()),
 	}
 }
 
 func (i Index[Obj, Key]) ObjectToKey(obj Obj) index.Key {
-	return i.FromObject(obj).First()
+	return i.encodeKey(i.FromObject(obj).First())
 }
 
 // Indexer is the "FromObject" subset of Index[Obj, Key]
@@ -384,7 +399,7 @@ type Indexer[Obj any] interface {
 }
 
 // TableWritable is a constraint for objects that implement tabular
-// pretty-printing. Used in "cilium-dbg statedb" sub-commands.
+// pretty-printing. Used by the "db" script commands to render a table.
 type TableWritable interface {
 	// TableHeader returns the header columns that are independent of the
 	// object.
@@ -447,9 +462,27 @@ type anyDeleteTracker interface {
 }
 
 type indexEntry struct {
-	tree   *part.Tree[object]
-	txn    *part.Txn[object]
+	tree *part.Tree[object]
+
+	// txn for mutating the index
+	txn *part.Txn[object]
+
+	// clone is the latest memoized clone of [txn] for reading that won't
+	// be invalidated by future writes. Cleared on write.
+	clone  part.Ops[object]
 	unique bool
+}
+
+func (ie *indexEntry) getClone() part.Ops[object] {
+	if ie.clone == nil {
+		if ie.txn == nil {
+			treeCopy := *ie.tree
+			ie.clone = &treeCopy
+		} else {
+			ie.clone = ie.txn.Clone()
+		}
+	}
+	return ie.clone
 }
 
 type tableEntry struct {

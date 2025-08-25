@@ -6,8 +6,8 @@ package prefilter
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
-	"path"
 
 	"github.com/cilium/hive/cell"
 
@@ -39,6 +39,7 @@ type preFilterMaps [mapCount]*cidrmap.CIDRMap
 
 // PreFilter holds global info on related CIDR maps participating in prefilter
 type PreFilter struct {
+	logger   *slog.Logger
 	maps     preFilterMaps
 	revision int64
 	mutex    lock.RWMutex
@@ -53,11 +54,6 @@ func (p *PreFilter) WriteConfig(fw io.Writer) {
 
 	fmt.Fprintf(fw, "#define CIDR4_HMAP_ELEMS %d\n", maxHKeys)
 	fmt.Fprintf(fw, "#define CIDR4_LMAP_ELEMS %d\n", maxLKeys)
-
-	fmt.Fprintf(fw, "#define CIDR4_HMAP_NAME %s\n", path.Base(p.maps[prefixesV4Fix].String()))
-	fmt.Fprintf(fw, "#define CIDR4_LMAP_NAME %s\n", path.Base(p.maps[prefixesV4Dyn].String()))
-	fmt.Fprintf(fw, "#define CIDR6_HMAP_NAME %s\n", path.Base(p.maps[prefixesV6Fix].String()))
-	fmt.Fprintf(fw, "#define CIDR6_LMAP_NAME %s\n", path.Base(p.maps[prefixesV6Dyn].String()))
 
 	fmt.Fprintf(fw, "#define CIDR4_FILTER\n")
 	fmt.Fprintf(fw, "#define CIDR4_LPM_PREFILTER\n")
@@ -207,25 +203,25 @@ func (p *PreFilter) initOneMap(which preFilterMapType) error {
 		prefixlen = net.IPv4len * 8
 		prefixdyn = true
 		maxelems = maxLKeys
-		path = bpf.MapPath(cidrmap.MapName + "v4_dyn")
+		path = bpf.MapPath(p.logger, cidrmap.MapName+"v4_dyn")
 	case prefixesV4Fix:
 		prefixlen = net.IPv4len * 8
 		prefixdyn = false
 		maxelems = maxHKeys
-		path = bpf.MapPath(cidrmap.MapName + "v4_fix")
+		path = bpf.MapPath(p.logger, cidrmap.MapName+"v4_fix")
 	case prefixesV6Dyn:
 		prefixlen = net.IPv6len * 8
 		prefixdyn = true
 		maxelems = maxLKeys
-		path = bpf.MapPath(cidrmap.MapName + "v6_dyn")
+		path = bpf.MapPath(p.logger, cidrmap.MapName+"v6_dyn")
 	case prefixesV6Fix:
 		prefixlen = net.IPv6len * 8
 		prefixdyn = false
 		maxelems = maxHKeys
-		path = bpf.MapPath(cidrmap.MapName + "v6_fix")
+		path = bpf.MapPath(p.logger, cidrmap.MapName+"v6_fix")
 	}
 
-	p.maps[which], err = cidrmap.OpenMapElems(path, prefixlen, prefixdyn, maxelems)
+	p.maps[which], err = cidrmap.OpenMapElems(p.logger, path, prefixlen, prefixdyn, maxelems)
 	if err != nil {
 		return err
 	}
@@ -242,8 +238,9 @@ func (p *PreFilter) init() error {
 }
 
 // newPreFilter returns prefilter handle
-func newPreFilter(config *option.DaemonConfig, lifecycle cell.Lifecycle) types.PreFilter {
+func newPreFilter(logger *slog.Logger, config *option.DaemonConfig, lifecycle cell.Lifecycle) types.PreFilter {
 	p := &PreFilter{
+		logger:   logger,
 		revision: 1,
 		enabled:  config.EnableXDPPrefilter,
 	}

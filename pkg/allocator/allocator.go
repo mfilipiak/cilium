@@ -9,9 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/google/uuid"
-	"github.com/sirupsen/logrus"
-
 	"github.com/cilium/cilium/pkg/backoff"
 	"github.com/cilium/cilium/pkg/idpool"
 	"github.com/cilium/cilium/pkg/kvstore"
@@ -28,6 +25,10 @@ var (
 )
 
 const (
+	// DefaultSyncInterval is the default value for the periodic synchronization
+	// of the allocated identities.
+	DefaultSyncInterval = 5 * time.Minute
+
 	// defaultMaxAllocAttempts is the default number of attempted allocation
 	// requests performed before failing.
 	defaultMaxAllocAttempts = 16
@@ -50,8 +51,8 @@ const (
 //
 // Lookup ID by key:
 //  1. Return ID from local cache updated by watcher (no Backend interactions)
-//  2. Do ListPrefix() on slave key excluding node suffix, return the first
-//     result that matches the exact prefix.
+//  2. Do ListPrefix() on slave key, return the first result that matches the exact
+//     prefix.
 //
 // Lookup key by ID:
 //  1. Return key from local cache updated by watcher (no Backend interactions)
@@ -67,7 +68,6 @@ const (
 //	2.1 Create a new slave key. This operation is potentially racy as the master
 //	    key can be removed in the meantime.
 //	    - etcd: Create is made conditional on existence of master key
-//	    - consul: locking
 //
 // ... match not found:
 //
@@ -110,10 +110,6 @@ type Allocator struct {
 	// localKeys contains all keys including their reference count for keys
 	// which have been allocated and are in local use
 	localKeys *localKeys
-
-	// suffix is the suffix attached to keys which must be node specific,
-	// this is typical set to the node's IP address
-	suffix string
 
 	// backoffTemplate is the backoff configuration while allocating
 	backoffTemplate backoff.Exponential
@@ -159,6 +155,9 @@ type Allocator struct {
 	// maxAllocAttempts is the number of attempted allocation requests
 	// performed before failing.
 	maxAllocAttempts int
+
+	// syncInterval is the interval for local keys refresh.
+	syncInterval time.Duration
 
 	// cacheValidators implement extra validations of retrieved identities, e.g.,
 	// to ensure that they belong to the expected range.
@@ -315,15 +314,16 @@ func NewAllocator(rootLogger *slog.Logger, typ AllocatorKey, backend Backend, op
 		backend:      backend,
 		min:          idpool.ID(1),
 		max:          idpool.ID(^uint64(0)),
-		localKeys:    newLocalKeys(),
+		localKeys:    newLocalKeys(rootLogger),
 		stopGC:       make(chan struct{}),
-		suffix:       uuid.New().String()[:10],
 		remoteCaches: map[string]*remoteCache{},
 		backoffTemplate: backoff.Exponential{
+			Logger: rootLogger.With(subsysLogAttr...),
 			Min:    time.Duration(20) * time.Millisecond,
 			Factor: 2.0,
 		},
 		maxAllocAttempts: defaultMaxAllocAttempts,
+		syncInterval:     DefaultSyncInterval,
 	}
 
 	for _, fn := range opts {
@@ -331,10 +331,6 @@ func NewAllocator(rootLogger *slog.Logger, typ AllocatorKey, backend Backend, op
 	}
 
 	a.mainCache = newCache(a)
-
-	if a.suffix == "<nil>" {
-		return nil, errors.New("allocator suffix is <nil> and unlikely unique")
-	}
 
 	if a.min < 1 {
 		return nil, errors.New("minimum ID must be >= 1")
@@ -429,6 +425,11 @@ func WithoutGC() AllocatorOption {
 // WithoutAutostart prevents starting the allocator when it is initialized
 func WithoutAutostart() AllocatorOption {
 	return func(a *Allocator) { a.disableAutostart = true }
+}
+
+// WithSyncInterval configures the interval for local keys refresh.
+func WithSyncInterval(interval time.Duration) AllocatorOption {
+	return func(a *Allocator) { a.syncInterval = interval }
 }
 
 // WithCacheValidator registers a validator triggered for each identity
@@ -527,7 +528,7 @@ type AllocatorKey interface {
 func (a *Allocator) lockedAllocate(ctx context.Context, key AllocatorKey) (idpool.ID, bool, bool, error) {
 	var firstUse bool
 
-	kvstore.Trace("Allocating key in kvstore", nil, logrus.Fields{fieldKey: key})
+	kvstore.Trace(a.logger, "Allocating key in kvstore", fieldKey, key)
 
 	k := key.GetKey()
 	lock, err := a.backend.Lock(ctx, key)
@@ -537,14 +538,13 @@ func (a *Allocator) lockedAllocate(ctx context.Context, key AllocatorKey) (idpoo
 
 	defer lock.Unlock(context.Background())
 
-	// fetch first key that matches /value/<key> while ignoring the
-	// node suffix
+	// fetch first key that matches /value/<key>
 	value, err := a.GetIfLocked(ctx, key, lock)
 	if err != nil {
 		return 0, false, false, err
 	}
 
-	kvstore.Trace("kvstore state is: ", nil, logrus.Fields{fieldID: value})
+	kvstore.Trace(a.logger, "kvstore state is: ", fieldID, value)
 
 	a.slaveKeysMutex.Lock()
 	defer a.slaveKeysMutex.Unlock()
@@ -574,7 +574,7 @@ func (a *Allocator) lockedAllocate(ctx context.Context, key AllocatorKey) (idpoo
 	}
 
 	if value != 0 {
-		a.logger.Info("Reusing existing global key", logfields.Key, k)
+		a.logger.Debug("Reusing existing global key", logfields.Key, k)
 
 		if err = a.backend.AcquireReference(ctx, value, key, lock); err != nil {
 			a.localKeys.release(k)
@@ -595,7 +595,7 @@ func (a *Allocator) lockedAllocate(ctx context.Context, key AllocatorKey) (idpoo
 		return 0, false, false, fmt.Errorf("no more available IDs in configured space")
 	}
 
-	kvstore.Trace("Selected available key ID", nil, logrus.Fields{fieldID: id})
+	kvstore.Trace(a.logger, "Selected available key ID", fieldID, id)
 
 	releaseKeyAndID := func() {
 		a.localKeys.release(k)
@@ -654,7 +654,7 @@ func (a *Allocator) lockedAllocate(ctx context.Context, key AllocatorKey) (idpoo
 		a.logger.Error("BUG: Unable to verify local key", logfields.Error, err)
 	}
 
-	a.logger.Info("Allocated new global key", logfields.Key, k)
+	a.logger.Debug("Allocated new global key", logfields.Key, k)
 
 	return id, true, firstUse, nil
 }
@@ -695,13 +695,13 @@ func (a *Allocator) Allocate(ctx context.Context, key AllocatorKey) (idpool.ID, 
 		return id, false, false, err
 	}
 
-	kvstore.Trace("Allocating from kvstore", nil, logrus.Fields{fieldKey: key})
+	kvstore.Trace(a.logger, "Allocating from kvstore", fieldKey, key)
 
 	// make a copy of the template and customize it
 	boff := a.backoffTemplate
 	boff.Name = key.String()
 
-	for attempt := 0; attempt < a.maxAllocAttempts; attempt++ {
+	for attempt := range a.maxAllocAttempts {
 		// Check our list of local keys already in use and increment the
 		// refcnt. The returned key must be released afterwards. No kvstore
 		// operation was performed for this allocation.
@@ -710,7 +710,10 @@ func (a *Allocator) Allocate(ctx context.Context, key AllocatorKey) (idpool.ID, 
 		// execution thread. It does not hurt to check if localKeys contains a
 		// reference for the key that we are attempting to allocate.
 		if val := a.localKeys.use(key.GetKey()); val != idpool.NoID {
-			kvstore.Trace("Reusing local id", nil, logrus.Fields{fieldID: val, fieldKey: key})
+			kvstore.Trace(a.logger, "Reusing local id",
+				fieldID, val,
+				fieldKey, key,
+			)
 			a.mainCache.insert(key, val)
 			return val, false, false, nil
 		}
@@ -742,7 +745,10 @@ func (a *Allocator) Allocate(ctx context.Context, key AllocatorKey) (idpool.ID, 
 			)
 		}
 
-		kvstore.Trace("Allocation attempt failed", err, logrus.Fields{fieldKey: key, logfields.Attempt: attempt})
+		kvstore.Trace(a.logger, "Allocation attempt failed",
+			fieldKey, key,
+			logfields.Attempt, attempt,
+		)
 
 		if waitErr := boff.Wait(ctx); waitErr != nil {
 			return 0, false, false, waitErr
@@ -773,7 +779,7 @@ func (a *Allocator) GetWithRetry(ctx context.Context, key AllocatorKey) (idpool.
 	var id idpool.ID
 	var err error
 
-	for attempt := 0; attempt < a.maxAllocAttempts; attempt++ {
+	for attempt := range a.maxAllocAttempts {
 		id, err = getID()
 		if err == nil {
 			return id, nil
@@ -913,7 +919,7 @@ func (a *Allocator) Release(ctx context.Context, key AllocatorKey) (lastUse bool
 		return false, nil
 	}
 
-	a.logger.Info("Releasing key", logfields.Key, key)
+	a.logger.Debug("Releasing key", logfields.Key, key)
 
 	select {
 	case <-a.initialListDone:
@@ -1036,7 +1042,7 @@ func (a *Allocator) startLocalKeySync() {
 			case <-a.stopGC:
 				a.logger.Debug("Stopped master key sync routine")
 				return
-			case <-time.After(option.Config.KVstorePeriodicSync):
+			case <-time.After(a.syncInterval):
 			}
 		}
 	}(a)

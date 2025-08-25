@@ -5,6 +5,7 @@ package cmd
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -31,9 +32,9 @@ func k8sEventMetric(scope, action string) {
 // enableCCNPWatcher is similar to enableCNPWatcher but handles the watch events for
 // clusterwide policies. Since, internally Clusterwide policies are implemented
 // using CiliumNetworkPolicy itself, the entire implementation uses the methods
-// associcated with CiliumNetworkPolicy.
-func enableCCNPWatcher(ctx context.Context, wg *sync.WaitGroup, clientset k8sClient.Clientset) {
-	log.Info("Starting CCNP derivative handler")
+// associated with CiliumNetworkPolicy.
+func enableCCNPWatcher(ctx context.Context, logger *slog.Logger, wg *sync.WaitGroup, clientset k8sClient.Clientset, clusterName string) {
+	logger.InfoContext(ctx, "Starting CCNP derivative handler")
 
 	ccnpStore := cache.NewStore(cache.DeletionHandlingMetaNamespaceKeyFunc)
 
@@ -42,21 +43,21 @@ func enableCCNPWatcher(ctx context.Context, wg *sync.WaitGroup, clientset k8sCli
 		&cilium_v2.CiliumClusterwideNetworkPolicy{},
 		0,
 		cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
+			AddFunc: func(obj any) {
 				k8sEventMetric(resources.MetricCCNP, resources.MetricCreate)
-				if cnp := informer.CastInformerEvent[types.SlimCNP](obj); cnp != nil {
+				if cnp := informer.CastInformerEvent[types.SlimCNP](logger, obj); cnp != nil {
 					// We need to deepcopy this structure because we are writing
 					// fields.
 					// See https://github.com/cilium/cilium/blob/27fee207f5422c95479422162e9ea0d2f2b6c770/pkg/policy/api/ingress.go#L112-L134
 					cnpCpy := cnp.DeepCopy()
 
-					groups.AddDerivativeCCNPIfNeeded(clientset, cnpCpy.CiliumNetworkPolicy)
+					groups.AddDerivativePolicyIfNeeded(logger, clientset, clusterName, cnpCpy.CiliumNetworkPolicy, true)
 				}
 			},
-			UpdateFunc: func(oldObj, newObj interface{}) {
+			UpdateFunc: func(oldObj, newObj any) {
 				k8sEventMetric(resources.MetricCCNP, resources.MetricUpdate)
-				if oldCNP := informer.CastInformerEvent[types.SlimCNP](oldObj); oldCNP != nil {
-					if newCNP := informer.CastInformerEvent[types.SlimCNP](newObj); newCNP != nil {
+				if oldCNP := informer.CastInformerEvent[types.SlimCNP](logger, oldObj); oldCNP != nil {
+					if newCNP := informer.CastInformerEvent[types.SlimCNP](logger, newObj); newCNP != nil {
 						if oldCNP.DeepEqual(newCNP) {
 							return
 						}
@@ -67,13 +68,13 @@ func enableCCNPWatcher(ctx context.Context, wg *sync.WaitGroup, clientset k8sCli
 						newCNPCpy := newCNP.DeepCopy()
 						oldCNPCpy := oldCNP.DeepCopy()
 
-						groups.UpdateDerivativeCCNPIfNeeded(clientset, newCNPCpy.CiliumNetworkPolicy, oldCNPCpy.CiliumNetworkPolicy)
+						groups.UpdateDerivativePolicyIfNeeded(logger, clientset, clusterName, newCNPCpy.CiliumNetworkPolicy, oldCNPCpy.CiliumNetworkPolicy, true)
 					}
 				}
 			},
-			DeleteFunc: func(obj interface{}) {
+			DeleteFunc: func(obj any) {
 				k8sEventMetric(resources.MetricCCNP, resources.MetricDelete)
-				cnp := informer.CastInformerEvent[types.SlimCNP](obj)
+				cnp := informer.CastInformerEvent[types.SlimCNP](logger, obj)
 				if cnp == nil {
 					return
 				}
@@ -99,7 +100,7 @@ func enableCCNPWatcher(ctx context.Context, wg *sync.WaitGroup, clientset k8sCli
 		controller.ControllerParams{
 			Group: ccnpToGroupsControllerGroup,
 			DoFunc: func(ctx context.Context) error {
-				groups.UpdateCNPInformation(clientset)
+				groups.UpdateCNPInformation(logger, clientset, clusterName)
 				return nil
 			},
 			RunInterval: 5 * time.Minute,

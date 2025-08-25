@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -35,7 +37,7 @@ import (
 
 // Fatalf prints the Printf formatted message to stderr and exits the program
 // Note: os.Exit(1) is not recoverable
-func Fatalf(msg string, args ...interface{}) {
+func Fatalf(msg string, args ...any) {
 	fmt.Fprintf(os.Stderr, "Error: %s\n", fmt.Sprintf(msg, args...))
 	os.Exit(1)
 }
@@ -43,7 +45,7 @@ func Fatalf(msg string, args ...interface{}) {
 // Usagef prints the Printf formatted message to stderr, prints usage help and
 // exits the program
 // Note: os.Exit(1) is not recoverable
-func Usagef(cmd *cobra.Command, msg string, args ...interface{}) {
+func Usagef(cmd *cobra.Command, msg string, args ...any) {
 	txt := fmt.Sprintf(msg, args...)
 	fmt.Fprintf(os.Stderr, "Error: %s\n\n", txt)
 	cmd.Help()
@@ -64,26 +66,6 @@ func requireEndpointID(cmd *cobra.Command, args []string) {
 	}
 }
 
-func requireEndpointIDorGlobal(cmd *cobra.Command, args []string) {
-	if len(args) < 1 {
-		Usagef(cmd, "Missing endpoint id or 'global' argument")
-	}
-
-	if args[0] != "global" {
-		requireEndpointID(cmd, args)
-	}
-}
-
-func requireRecorderID(cmd *cobra.Command, args []string) {
-	if len(args) < 1 {
-		Usagef(cmd, "Missing recorder id argument")
-	}
-
-	if args[0] == "" {
-		Usagef(cmd, "Empty recorder id argument")
-	}
-}
-
 func requirePath(cmd *cobra.Command, args []string) {
 	if len(args) < 1 {
 		Usagef(cmd, "Missing path argument")
@@ -91,16 +73,6 @@ func requirePath(cmd *cobra.Command, args []string) {
 
 	if args[0] == "" {
 		Usagef(cmd, "Empty path argument")
-	}
-}
-
-func requireServiceID(cmd *cobra.Command, args []string) {
-	if len(args) < 1 {
-		Usagef(cmd, "Missing service id argument")
-	}
-
-	if args[0] == "" {
-		Usagef(cmd, "Empty service id argument")
 	}
 }
 
@@ -141,7 +113,7 @@ func expandNestedJSON(result bytes.Buffer) (bytes.Buffer, error) {
 		}
 
 		// Determine the current indentation
-		for i := 0; i < loc[0]-1; i++ {
+		for i := range loc[0] - 1 {
 			idx := loc[0] - i - 1
 			if resBytes[idx] != ' ' {
 				break
@@ -171,7 +143,7 @@ func expandNestedJSON(result bytes.Buffer) (bytes.Buffer, error) {
 		// Decode the nested JSON
 		decoded := ""
 		if nestedEnd != 0 {
-			m := make(map[string]interface{})
+			m := make(map[string]any)
 			nested := bytes.NewBufferString(unquoted[nestedStart:nestedEnd])
 			if err := json.NewDecoder(nested).Decode(&m); err != nil {
 				return bytes.Buffer{}, fmt.Errorf("Failed to decode nested JSON: %s (\n%s\n)", err.Error(), unquoted[nestedStart:nestedEnd])
@@ -239,12 +211,12 @@ func parseTrafficString(td string) (trafficdirection.TrafficDirection, error) {
 // command, provided as a list containing the endpoint ID, traffic direction,
 // identity and optionally, a list of ports.
 // Returns a parsed representation of the command arguments.
-func parsePolicyUpdateArgs(cmd *cobra.Command, args []string, isDeny bool) *PolicyUpdateArgs {
+func parsePolicyUpdateArgs(logger *slog.Logger, cmd *cobra.Command, args []string, isDeny bool) *PolicyUpdateArgs {
 	if len(args) < 3 {
 		Usagef(cmd, "<endpoint id>, <traffic-direction>, and <identity> required")
 	}
 
-	pa, err := parsePolicyUpdateArgsHelper(args, isDeny)
+	pa, err := parsePolicyUpdateArgsHelper(logger, args, isDeny)
 	if err != nil {
 		Fatalf("%s", err)
 	}
@@ -252,7 +224,7 @@ func parsePolicyUpdateArgs(cmd *cobra.Command, args []string, isDeny bool) *Poli
 	return pa
 }
 
-func endpointToPolicyMapPath(endpointID string) (string, error) {
+func endpointToPolicyMapPath(logger *slog.Logger, endpointID string) (string, error) {
 	if endpointID == "" {
 		return "", fmt.Errorf("Need ID or label")
 	}
@@ -268,17 +240,17 @@ func endpointToPolicyMapPath(endpointID string) (string, error) {
 		return "", err
 	}
 
-	return bpf.MapPath(mapName), nil
+	return bpf.MapPath(logger, mapName), nil
 }
 
-func parsePolicyUpdateArgsHelper(args []string, isDeny bool) (*PolicyUpdateArgs, error) {
+func parsePolicyUpdateArgsHelper(logger *slog.Logger, args []string, isDeny bool) (*PolicyUpdateArgs, error) {
 	trafficDirection := args[1]
 	parsedTd, err := parseTrafficString(trafficDirection)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to convert %s to a valid traffic direction: %w", args[1], err)
 	}
 
-	mapName, err := endpointToPolicyMapPath(args[0])
+	mapName, err := endpointToPolicyMapPath(logger, args[0])
 	if err != nil {
 		return nil, fmt.Errorf("Failed to parse endpointID %q", args[0])
 	}
@@ -332,7 +304,7 @@ func updatePolicyKey(pa *PolicyUpdateArgs, add bool) {
 	// The map needs not to be transparently initialized here even if
 	// it's not present for some reason. Triggering map recreation with
 	// OpenOrCreate when some map attribute had changed would be much worse.
-	policyMap, err := policymap.OpenPolicyMap(pa.path)
+	policyMap, err := policymap.OpenPolicyMap(log, pa.path)
 	if err != nil {
 		Fatalf("Cannot open policymap %q : %s", pa.path, err)
 	}
@@ -356,13 +328,7 @@ func updatePolicyKey(pa *PolicyUpdateArgs, add bool) {
 
 // dumpConfig pretty prints boolean options
 func dumpConfig(Opts map[string]string, indented bool) {
-	opts := []string{}
-	for k := range Opts {
-		opts = append(opts, k)
-	}
-	slices.Sort(opts)
-
-	for _, k := range opts {
+	for _, k := range slices.Sorted(maps.Keys(Opts)) {
 		// XXX: Reuse the format function from *option.Library
 		value = Opts[k]
 		formatStr := "%-34s: %s\n"
@@ -380,11 +346,11 @@ func dumpConfig(Opts map[string]string, indented bool) {
 	}
 }
 
-func mapKeysToLowerCase(s map[string]interface{}) map[string]interface{} {
-	m := make(map[string]interface{})
+func mapKeysToLowerCase(s map[string]any) map[string]any {
+	m := make(map[string]any)
 	for k, v := range s {
 		if reflect.ValueOf(v).Kind() == reflect.Map {
-			for i, j := range v.(map[string]interface{}) {
+			for i, j := range v.(map[string]any) {
 				m[strings.ToLower(i)] = j
 			}
 		}
@@ -422,14 +388,9 @@ func getIpEnableStatuses() (bool, bool) {
 	return defaults.EnableIPv4, defaults.EnableIPv6
 }
 
-func mergeMaps(m1, m2 map[string]interface{}) map[string]interface{} {
-	m3 := make(map[string]interface{})
-	for k, v := range m1 {
-		m3[k] = v
-	}
-	for k, v := range m2 {
-		m3[k] = v
-	}
+func mergeMaps(m1, m2 map[string]any) map[string]any {
+	m3 := maps.Clone(m1)
+	maps.Copy(m3, m2)
 	return m3
 }
 

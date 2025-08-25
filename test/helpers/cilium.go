@@ -17,14 +17,13 @@ import (
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/identity"
-	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/test/config"
 	ginkgoext "github.com/cilium/cilium/test/ginkgo-ext"
 	"github.com/cilium/cilium/test/helpers/logutils"
 )
 
-var log = logging.DefaultLogger
+var log = logrus.New()
 
 // BpfIPCacheList returns the output of `cilium-dbg bpf ipcache list -o json` as a map
 // Key will be the CIDR (address with mask) and the value is the associated numeric security identity
@@ -112,55 +111,6 @@ func (s *SSHMeta) EndpointGet(id string) *models.Endpoint {
 	return nil
 }
 
-// GetEndpointMutableConfigurationOption returns the value of the mutable
-// configuration option optionName for the endpoint with ID endpointID, or an
-// error if optionName's corresponding value cannot be retrieved for the
-// endpoint.
-func (s *SSHMeta) GetEndpointMutableConfigurationOption(endpointID, optionName string) (string, error) {
-	cmd := fmt.Sprintf("endpoint config %s -o json | jq -r '.realized.options.%s'", endpointID, optionName)
-	res := s.ExecCilium(cmd)
-	if !res.WasSuccessful() {
-		return "", fmt.Errorf("Unable to execute %q: %s", cmd, res.CombineOutput())
-	}
-
-	return res.SingleOut(), nil
-}
-
-// SetAndWaitForEndpointConfiguration waits for the endpoint configuration to become a certain value
-func (s *SSHMeta) SetAndWaitForEndpointConfiguration(endpointID, optionName, expectedValue string) error {
-	logger := s.logger.WithFields(logrus.Fields{
-		logfields.EndpointID: endpointID,
-		"option":             optionName,
-		"value":              expectedValue})
-	body := func() bool {
-		logger.Infof("Setting endpoint configuration")
-		status := s.EndpointSetConfig(endpointID, optionName, expectedValue)
-		if !status {
-			logger.Error("Cannot set endpoint configuration")
-			return status
-		}
-
-		value, err := s.GetEndpointMutableConfigurationOption(endpointID, optionName)
-		if err != nil {
-			log.WithError(err).Error("cannot get endpoint configuration")
-			return false
-		}
-
-		if value == expectedValue {
-			return true
-		}
-		logger.Debugf("Expected configuration option to have value %s, but got %s",
-			expectedValue, value)
-		return false
-	}
-
-	err := WithTimeout(
-		body,
-		fmt.Sprintf("cannot set endpoint config for endpoint %q", endpointID),
-		&TimeoutConfig{Timeout: HelperTimeout})
-	return err
-}
-
 // WaitEndpointsDeleted waits up until timeout reached for all endpoints to be
 // deleted. Returns true if all endpoints have been deleted before HelperTimeout
 // is exceeded, false otherwise.
@@ -187,31 +137,6 @@ func (s *SSHMeta) WaitEndpointsDeleted() bool {
 	}
 	return true
 
-}
-
-// WaitDockerPluginReady waits up until timeout reached for Cilium docker plugin to be ready
-func (s *SSHMeta) WaitDockerPluginReady() bool {
-	logger := s.logger.WithFields(logrus.Fields{"functionName": "WaitDockerPluginReady"})
-
-	body := func() bool {
-		// check that docker plugin socket exists
-		cmd := `stat /run/docker/plugins/cilium.sock`
-		res := s.ExecWithSudo(cmd)
-		if !res.WasSuccessful() {
-			return false
-		}
-		// check that connect works
-		cmd = `nc -U -z /run/docker/plugins/cilium.sock`
-		res = s.ExecWithSudo(cmd)
-		return res.WasSuccessful()
-	}
-	err := WithTimeout(body, "Docker plugin is not ready after timeout", &TimeoutConfig{Timeout: HelperTimeout})
-	if err != nil {
-		logger.WithError(err).Warn("Docker plugin is not ready after timeout")
-		s.ExecWithSudo("ls -l /run/docker/plugins/cilium.sock") // This function is only for debugginag.
-		return false
-	}
-	return true
 }
 
 func (s *SSHMeta) MonitorDebug(on bool, epID string) bool {
@@ -279,40 +204,6 @@ func (s *SSHMeta) WaitEndpointsReady() bool {
 	return true
 }
 
-// EndpointSetConfig sets the provided configuration option to the provided
-// value for the endpoint with the endpoint ID id. It returns true if the
-// configuration update command returned successfully.
-func (s *SSHMeta) EndpointSetConfig(id, option, value string) bool {
-	logger := s.logger.WithFields(logrus.Fields{"endpointID": id})
-	res := s.ExecCilium(fmt.Sprintf(
-		"endpoint config %s -o json | jq -r '.realized.options.%s'", id, option))
-
-	if res.SingleOut() == value {
-		logger.Debugf("no need to update %s=%s; value already set", option, value)
-		return res.WasSuccessful()
-	}
-
-	before := s.EndpointGet(id)
-	if before == nil {
-		return false
-	}
-
-	configCmd := fmt.Sprintf("endpoint config %s %s=%s", id, option, value)
-	data := s.ExecCilium(configCmd)
-	if !data.WasSuccessful() {
-		logger.Errorf("cannot set endpoint configuration %s=%s", option, value)
-		return false
-	}
-
-	return true
-}
-
-// ListEndpoints returns the CmdRes resulting from executing
-// `cilium-dbg endpoint list -o json`.
-func (s *SSHMeta) ListEndpoints() *CmdRes {
-	return s.ExecCilium("endpoint list -o json")
-}
-
 // GetEndpointsIDMap returns a mapping of an endpoint ID to Docker container
 // name, and an error if the list of endpoints cannot be retrieved via the
 // Cilium CLI.
@@ -351,33 +242,6 @@ func (s *SSHMeta) GetEndpointsIds() (map[string]string, error) {
 		return nil, fmt.Errorf("%q failed: %s", cmd, endpoints.CombineOutput())
 	}
 	return endpoints.KVOutput(), nil
-}
-
-// GetEndpointsIdentityIds returns a mapping of a Docker container name to it's
-// corresponding endpoint's security identity, it will return an error if the list
-// of endpoints cannot be retrieved via the Cilium CLI.
-func (s *SSHMeta) GetEndpointsIdentityIds() (map[string]string, error) {
-	filter := `{range [*]}{@.status.external-identifiers.container-name}{"="}{@.status.identity.id}{"\n"}{end}`
-	endpoints := s.ExecCilium(fmt.Sprintf("endpoint list -o jsonpath='%s'", filter))
-	if !endpoints.WasSuccessful() {
-		return nil, fmt.Errorf("cannot get endpoint list: %s", endpoints.CombineOutput())
-	}
-	return endpoints.KVOutput(), nil
-}
-
-// GetEndpointsNames returns the container-name field of each Cilium endpoint.
-func (s *SSHMeta) GetEndpointsNames() ([]string, error) {
-	data := s.ListEndpoints()
-	if !data.WasSuccessful() {
-		return nil, fmt.Errorf("`cilium-dbg endpoint list` was not successful")
-	}
-
-	result, err := data.Filter("{ [?(@.status.labels.security-relevant[0]!='reserved:health')].status.external-identifiers.container-name }")
-	if err != nil {
-		return nil, err
-	}
-
-	return strings.Split(result.String(), " "), nil
 }
 
 // ManifestsPath returns the path of the directory where manifests (YAMLs
@@ -477,12 +341,6 @@ func (s *SSHMeta) PolicyGet(id string) *CmdRes {
 	return s.ExecCilium(fmt.Sprintf("policy get %s", id))
 }
 
-// PolicyGetAll gets all policies that are imported in the Cilium agent.
-func (s *SSHMeta) PolicyGetAll() *CmdRes {
-	return s.ExecCilium("policy get")
-
-}
-
 // PolicyGetRevision retrieves the current policy revision number in the Cilium
 // agent.
 func (s *SSHMeta) PolicyGetRevision() (int, error) {
@@ -547,16 +405,6 @@ func (s *SSHMeta) PolicyImportAndWait(path string, timeout time.Duration) (int, 
 		logfields.PolicyRevision: revision,
 	}).Infof("policy import finished and revision increased")
 	return revision, err
-}
-
-// PolicyImport imports a new policy into Cilium.
-func (s *SSHMeta) PolicyImport(path string) error {
-	res := s.ExecCilium(fmt.Sprintf("policy import %s", path))
-	if !res.WasSuccessful() {
-		s.logger.Errorf("could not import policy: %s", res.CombineOutput())
-		return fmt.Errorf("could not import policy %s", path)
-	}
-	return nil
 }
 
 // PolicyRenderAndImport receives an string with a policy, renders it in the
@@ -848,18 +696,6 @@ func (s *SSHMeta) RestartCilium() error {
 		return fmt.Errorf("Endpoints are not ready after timeout")
 	}
 	return nil
-}
-
-// AddIPToLoopbackDevice adds the specified IP (assumed to be in form <ip>/<mask>)
-// to the loopback device on s.
-func (s *SSHMeta) AddIPToLoopbackDevice(ip string) *CmdRes {
-	return s.ExecWithSudo(fmt.Sprintf("ip addr add dev lo %s", ip))
-}
-
-// RemoveIPFromLoopbackDevice removes the specified IP (assumed to be in form <ip>/<mask>)
-// from the loopback device on s.
-func (s *SSHMeta) RemoveIPFromLoopbackDevice(ip string) *CmdRes {
-	return s.ExecWithSudo(fmt.Sprintf("ip addr del dev lo %s", ip))
 }
 
 // FlushGlobalConntrackTable flushes the global connection tracking table.

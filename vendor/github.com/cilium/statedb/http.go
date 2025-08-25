@@ -74,11 +74,11 @@ func (h dbHandler) query(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txn := h.db.ReadTxn().getTxn()
+	txn := h.db.ReadTxn()
 
 	// Look up the table
 	var table TableMeta
-	for _, e := range txn.root {
+	for _, e := range txn.root() {
 		if e.meta.Name() == req.Table {
 			table = e.meta
 			break
@@ -124,6 +124,9 @@ type QueryResponse struct {
 
 func runQuery(indexTxn indexReadTxn, lowerbound bool, queryKey []byte, onObject func(object) error) {
 	var iter *part.Iterator[object]
+	if !indexTxn.unique {
+		queryKey = encodeNonUniqueBytes(queryKey)
+	}
 	if lowerbound {
 		iter = indexTxn.LowerBound(queryKey)
 	} else {
@@ -137,8 +140,7 @@ func runQuery(indexTxn indexReadTxn, lowerbound bool, queryKey []byte, onObject 
 		match = func(k []byte) bool { return len(k) == len(queryKey) }
 	default:
 		match = func(k []byte) bool {
-			secondary, _ := decodeNonUniqueKey(k)
-			return len(secondary) == len(queryKey)
+			return nonUniqueKey(k).secondaryLen() == len(queryKey)
 		}
 	}
 	for key, obj, ok := iter.Next(); ok; key, obj, ok = iter.Next() {
@@ -159,7 +161,7 @@ func (h dbHandler) changes(w http.ResponseWriter, r *http.Request) {
 
 	// Look up the table
 	var tableMeta TableMeta
-	for _, e := range h.db.ReadTxn().getTxn().root {
+	for _, e := range h.db.ReadTxn().root() {
 		if e.meta.Name() == tableName {
 			tableMeta = e.meta
 			break

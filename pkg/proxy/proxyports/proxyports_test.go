@@ -8,12 +8,36 @@ import (
 	"os"
 	"testing"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/require"
 
+	datapath "github.com/cilium/cilium/pkg/datapath/fake/types"
 	"github.com/cilium/cilium/pkg/envoy"
 	"github.com/cilium/cilium/pkg/proxy/types"
 	"github.com/cilium/cilium/pkg/time"
+	"github.com/cilium/cilium/pkg/trigger"
 )
+
+func proxyPortsForTest(t *testing.T) (*ProxyPorts, func()) {
+	fakeIPTablesManager := &datapath.FakeIptablesManager{}
+	config := ProxyPortsConfig{
+		ProxyPortrangeMin:          10000,
+		ProxyPortrangeMax:          20000,
+		RestoredProxyPortsAgeLimit: 0,
+	}
+
+	p := NewProxyPorts(hivetest.Logger(t), config, fakeIPTablesManager)
+	triggerDone := make(chan struct{})
+	p.Trigger, _ = trigger.NewTrigger(trigger.Parameters{
+		MinInterval:  10 * time.Millisecond,
+		TriggerFunc:  func(reasons []string) {},
+		ShutdownFunc: func() { close(triggerDone) },
+	})
+	return p, func() {
+		p.Trigger.Shutdown()
+		<-triggerDone
+	}
+}
 
 func (p *ProxyPorts) released(pp *ProxyPort) bool {
 	p.mutex.Lock()
@@ -78,19 +102,18 @@ func TestPortAllocator(t *testing.T) {
 	require.False(t, pp.acknowledged)
 	require.Zero(t, pp.ProxyPort)
 
-	err = p.releaseProxyPortWithWait("listener1", 10*time.Millisecond)
+	err = p.releaseProxyPortWithWait("listener1", time.Minute /* extra high wait time - as it should not be used */)
 	require.NoError(t, err)
 
-	// Proxy port is not released immediately
+	require.True(t, p.released(pp), "Proxy port is not released immediately")
 	require.Zero(t, pp.nRedirects)
 	require.Zero(t, pp.ProxyPort)
 	port1a, _, err = p.GetProxyPort("listener1")
 	require.NoError(t, err)
 	require.Zero(t, port1a)
 
-	require.Eventually(t, func() bool {
-		return p.released(pp)
-	}, 100*time.Millisecond, time.Millisecond)
+	// Cancel timed proxy port release - otherwise it will interfere with upcoming test logic
+	pp.releaseCancel()
 
 	// ProxyPort lingers and can still be found, but it's port is zeroed
 	port1b, _, err := p.GetProxyPort("listener1")

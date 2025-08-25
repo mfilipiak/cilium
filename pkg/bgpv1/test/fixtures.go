@@ -11,6 +11,7 @@ import (
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/hivetest"
+	"github.com/cilium/statedb"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	k8sTesting "k8s.io/client-go/testing"
@@ -20,6 +21,8 @@ import (
 	"github.com/cilium/cilium/pkg/annotation"
 	"github.com/cilium/cilium/pkg/bgpv1"
 	"github.com/cilium/cilium/pkg/bgpv1/agent"
+	"github.com/cilium/cilium/pkg/bgpv1/manager"
+	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/hive"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	k8sPkg "github.com/cilium/cilium/pkg/k8s"
@@ -27,6 +30,7 @@ import (
 	cilium_api_v2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
 	"github.com/cilium/cilium/pkg/k8s/client/clientset/versioned/typed/cilium.io/v2alpha1"
+	k8sFakeClient "github.com/cilium/cilium/pkg/k8s/client/testutils"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	slim_core_v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	slim_meta_v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
@@ -72,7 +76,7 @@ var (
 // fixture is test harness
 type fixture struct {
 	config        fixtureConfig
-	fakeClientSet *k8sClient.FakeClientset
+	fakeClientSet *k8sFakeClient.FakeClientset
 	policyClient  v2alpha1.CiliumBGPPeeringPolicyInterface
 	secretClient  clientset_core_v1.SecretInterface
 	hive          *hive.Hive
@@ -154,7 +158,7 @@ func newFixture(t testing.TB, ctx context.Context, conf fixtureConfig) (*fixture
 		}
 	}
 
-	f.fakeClientSet, _ = k8sClient.NewFakeClientset(hivetest.Logger(t))
+	f.fakeClientSet, _ = k8sFakeClient.NewFakeClientset(hivetest.Logger(t))
 	f.policyClient = f.fakeClientSet.CiliumFakeClientset.CiliumV2alpha1().CiliumBGPPeeringPolicies()
 	f.secretClient = f.fakeClientSet.SlimFakeClientset.CoreV1().Secrets("bgp-secrets")
 
@@ -196,6 +200,13 @@ func newFixture(t testing.TB, ctx context.Context, conf fixtureConfig) (*fixture
 			return f.fakeClientSet
 		}),
 
+		// Provide route and device tables
+		cell.Provide(
+			tables.NewRouteTable,
+			tables.NewDeviceTable,
+			statedb.RWTable[*tables.Route].ToTable,  // Table[*Route]
+			statedb.RWTable[*tables.Device].ToTable, // Table[*Device]
+		),
 		// daemon config
 		cell.Provide(func() *option.DaemonConfig {
 			return &option.DaemonConfig{
@@ -208,6 +219,10 @@ func newFixture(t testing.TB, ctx context.Context, conf fixtureConfig) (*fixture
 		// local bgp state for inspection
 		cell.Invoke(func(bgp *agent.Controller) {
 			f.bgp = bgp
+		}),
+
+		cell.Invoke(func(m agent.BGPRouterManager) {
+			m.(*manager.BGPRouterManager).DestroyRouterOnStop(true) // fully destroy GoBGP server on Stop()
 		}),
 
 		metrics.Cell,

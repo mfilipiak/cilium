@@ -74,9 +74,10 @@ type ConformanceTestSuite struct {
 	SkipTests                sets.Set[string]
 	SkipProvisionalTests     bool
 	RunTest                  string
+	Hook                     func(t *testing.T, test ConformanceTest, suite *ConformanceTestSuite)
 	ManifestFS               []fs.FS
-	UsableNetworkAddresses   []v1beta1.GatewayAddress
-	UnusableNetworkAddresses []v1beta1.GatewayAddress
+	UsableNetworkAddresses   []v1beta1.GatewaySpecAddress
+	UnusableNetworkAddresses []v1beta1.GatewaySpecAddress
 
 	// mode is the operating mode of the implementation.
 	// The default value for it is "default".
@@ -121,13 +122,14 @@ type ConformanceTestSuite struct {
 	lock sync.RWMutex
 }
 
-// Options can be used to initialize a ConformanceTestSuite.
+// ConformanceOptions can be used to initialize a ConformanceTestSuite.
 type ConformanceOptions struct {
 	Client               client.Client
 	ClientOptions        client.Options
 	Clientset            clientset.Interface
 	RestConfig           *rest.Config
 	GatewayClassName     string
+	AddressType          string
 	Debug                bool
 	RoundTripper         roundtripper.RoundTripper
 	GRPCClient           grpc.Client
@@ -151,17 +153,18 @@ type ConformanceOptions struct {
 	SkipProvisionalTests bool
 	// RunTest is a single test to run, mostly for development/debugging convenience.
 	RunTest string
-
+	// Hook is an optional function that can be used to run custom logic after each test at suite level.
+	Hook       func(t *testing.T, test ConformanceTest, suite *ConformanceTestSuite)
 	ManifestFS []fs.FS
 
 	// UsableNetworkAddresses is an optional pool of usable addresses for
 	// Gateways for tests which need to test manual address assignments.
-	UsableNetworkAddresses []v1beta1.GatewayAddress
+	UsableNetworkAddresses []v1beta1.GatewaySpecAddress
 
 	// UnusableNetworkAddresses is an optional pool of unusable addresses for
 	// Gateways for tests which need to test failures with manual Gateway
 	// address assignment.
-	UnusableNetworkAddresses []v1beta1.GatewayAddress
+	UnusableNetworkAddresses []v1beta1.GatewaySpecAddress
 
 	Mode                string
 	AllowCRDsMismatch   bool
@@ -249,6 +252,7 @@ func NewConformanceTestSuite(options ConformanceOptions) (*ConformanceTestSuite,
 		Applier: kubernetes.Applier{
 			NamespaceLabels:      options.NamespaceLabels,
 			NamespaceAnnotations: options.NamespaceAnnotations,
+			AddressType:          options.AddressType,
 		},
 		SupportedFeatures:           options.SupportedFeatures,
 		TimeoutConfig:               options.TimeoutConfig,
@@ -266,6 +270,7 @@ func NewConformanceTestSuite(options ConformanceOptions) (*ConformanceTestSuite,
 		mode:                        mode,
 		apiVersion:                  apiVersion,
 		apiChannel:                  apiChannel,
+		Hook:                        options.Hook,
 	}
 
 	for _, conformanceProfileName := range options.ConformanceProfiles.UnsortedList() {
@@ -447,7 +452,7 @@ func (suite *ConformanceTestSuite) Run(t *testing.T, tests []ConformanceTest) er
 
 		// TODO(wstcliyu): need a better long term solution for test isolation
 		// https://github.com/kubernetes-sigs/gateway-api/issues/3233
-		if res != testSkipped && res != testNotSupported && sleepForTestIsolation {
+		if res != testSkipped && res != testNotSupported && sleepForTestIsolation && suite.TimeoutConfig.TestIsolation > 0 {
 			tlog.Logf(t, "Sleeping %v for test isolation", suite.TimeoutConfig.TestIsolation)
 			time.Sleep(suite.TimeoutConfig.TestIsolation)
 		}
@@ -467,6 +472,13 @@ func (suite *ConformanceTestSuite) Run(t *testing.T, tests []ConformanceTest) er
 		}
 		if res == testSucceeded || res == testFailed {
 			sleepForTestIsolation = true
+		}
+
+		// call the hook function if it was provided,
+		// this's useful for running custom logic after each test at suite level,
+		// such as collecting current state of the cluster for debugging.
+		if suite.Hook != nil {
+			suite.Hook(t, test, suite)
 		}
 	}
 

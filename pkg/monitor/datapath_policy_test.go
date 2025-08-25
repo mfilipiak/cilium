@@ -40,7 +40,7 @@ func TestDecodePolicyVerdicyNotify(t *testing.T) {
 	require.NoError(t, err)
 
 	output := &PolicyVerdictNotify{}
-	err = DecodePolicyVerdictNotify(buf.Bytes(), output)
+	err = output.Decode(buf.Bytes())
 	require.NoError(t, err)
 
 	require.Equal(t, input.Type, output.Type)
@@ -69,11 +69,10 @@ func BenchmarkNewDecodePolicyVerdictNotify(b *testing.B) {
 	}
 
 	b.ReportAllocs()
-	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		pvn := &PolicyVerdictNotify{}
-		if err := DecodePolicyVerdictNotify(buf.Bytes(), pvn); err != nil {
+		if err := pvn.Decode(buf.Bytes()); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -88,9 +87,8 @@ func BenchmarkOldDecodePolicyVerdictNotify(b *testing.B) {
 	}
 
 	b.ReportAllocs()
-	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		pvn := &PolicyVerdictNotify{}
 		if err := binary.Read(bytes.NewBuffer(buf.Bytes()), byteorder.Native, pvn); err != nil {
 			b.Fatal(err)

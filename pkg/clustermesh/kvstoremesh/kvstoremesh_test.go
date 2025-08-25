@@ -17,7 +17,6 @@ import (
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/hivetest"
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	baseclocktest "k8s.io/utils/clock/testing"
@@ -25,15 +24,14 @@ import (
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/clustermesh-apiserver/syncstate"
+	"github.com/cilium/cilium/pkg/clustermesh/clustercfg"
 	"github.com/cilium/cilium/pkg/clustermesh/common"
 	"github.com/cilium/cilium/pkg/clustermesh/types"
-	"github.com/cilium/cilium/pkg/clustermesh/utils"
 	"github.com/cilium/cilium/pkg/hive"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/kvstore/store"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
-	"github.com/cilium/cilium/pkg/promise"
 	"github.com/cilium/cilium/pkg/testutils"
 )
 
@@ -115,7 +113,7 @@ func clockAdvance(t assert.TestingT, fc *baseclocktest.FakeClock, d time.Duratio
 func TestRemoteClusterRun(t *testing.T) {
 	testutils.IntegrationTest(t)
 
-	kvstore.SetupDummyWithConfigOpts(t, "etcd",
+	client := kvstore.SetupDummyWithConfigOpts(t, "etcd",
 		// Explicitly set higher QPS than the default to speedup the test
 		map[string]string{kvstore.EtcdRateLimitOption: "100"},
 	)
@@ -232,19 +230,19 @@ func TestRemoteClusterRun(t *testing.T) {
 				cancel()
 				wg.Wait()
 
-				require.NoError(t, kvstore.Client().DeletePrefix(context.Background(), kvstore.BaseKeyPrefix))
+				require.NoError(t, client.DeletePrefix(context.Background(), kvstore.BaseKeyPrefix))
 			})
 
 			remoteClient := &remoteEtcdClientWrapper{
-				BackendOperations: kvstore.Client(),
+				BackendOperations: client,
 				name:              "foo",
 				cached:            tt.srccfg.Capabilities.Cached,
 				kvs:               tt.kvs,
 			}
 
-			st := store.NewFactory(store.MetricsProvider())
+			st := store.NewFactory(hivetest.Logger(t), store.MetricsProvider())
 			fakeclock := baseclocktest.NewFakeClock(time.Now())
-			km := KVStoreMesh{backend: kvstore.Client(), storeFactory: st, logger: logrus.New(), clock: fakeclock}
+			km := KVStoreMesh{client: client, storeFactory: st, logger: hivetest.Logger(t), clock: fakeclock}
 
 			rc := km.newRemoteCluster("foo", nil)
 			ready := make(chan error)
@@ -260,7 +258,7 @@ func TestRemoteClusterRun(t *testing.T) {
 
 			// Assert that the cluster config got properly propagated
 			require.EventuallyWithT(t, func(c *assert.CollectT) {
-				cfg, err := utils.GetClusterConfig(ctx, "foo", kvstore.Client())
+				cfg, err := clustercfg.Get(ctx, "foo", client)
 				assert.NoError(c, err)
 				assert.Equal(c, tt.dstcfg, cfg)
 			}, timeout, tick, "Failed to retrieve the cluster config")
@@ -277,14 +275,14 @@ func TestRemoteClusterRun(t *testing.T) {
 			// Assert that the keys have been properly reflected
 			for key, value := range expectedReflected {
 				require.EventuallyWithTf(t, func(c *assert.CollectT) {
-					v, err := kvstore.Client().Get(ctx, key)
+					v, err := client.Get(ctx, key)
 					assert.NoError(c, err)
 					assert.Equal(c, value, string(v))
 				}, timeout, tick, "Expected key %q does not seem to have the correct value %q", key, value)
 			}
 
 			// Assert that other keys have not been reflected
-			values, err := kvstore.Client().ListPrefix(ctx, "cilium/cache/identities/v1/")
+			values, err := client.ListPrefix(ctx, "cilium/cache/identities/v1/")
 			require.NoError(t, err)
 			require.Len(t, values, 1)
 
@@ -300,7 +298,7 @@ func TestRemoteClusterRun(t *testing.T) {
 			// Assert that the sync canaries have been properly set
 			for _, key := range expectedSyncedCanaries {
 				require.EventuallyWithTf(t, func(c *assert.CollectT) {
-					v, err := kvstore.Client().Get(ctx, key)
+					v, err := client.Get(ctx, key)
 					assert.NoError(c, err)
 					assert.NotEmpty(c, string(v))
 				}, timeout, tick, "Expected sync canary %q is not correctly present", key)
@@ -319,7 +317,7 @@ func TestRemoteClusterRun(t *testing.T) {
 			// Assert that Remove() removes all keys previously created
 			rc.Remove(context.Background())
 
-			pairs, err := kvstore.Client().ListPrefix(context.Background(), kvstore.BaseKeyPrefix)
+			pairs, err := client.ListPrefix(context.Background(), kvstore.BaseKeyPrefix)
 			require.NoError(t, err, "Failed to retrieve kvstore keys")
 			require.Empty(t, pairs, "Cached keys not correctly removed")
 		})
@@ -327,7 +325,7 @@ func TestRemoteClusterRun(t *testing.T) {
 }
 
 type localClientWrapper struct {
-	kvstore.BackendOperations
+	kvstore.Client
 	errors map[string]uint
 }
 
@@ -337,7 +335,7 @@ func (lcw *localClientWrapper) Delete(ctx context.Context, key string) error {
 		return errors.New("fake error")
 	}
 
-	return lcw.BackendOperations.Delete(ctx, key)
+	return lcw.Client.Delete(ctx, key)
 }
 
 func (lcw *localClientWrapper) DeletePrefix(ctx context.Context, path string) error {
@@ -346,14 +344,14 @@ func (lcw *localClientWrapper) DeletePrefix(ctx context.Context, path string) er
 		return errors.New("fake error")
 	}
 
-	return lcw.BackendOperations.DeletePrefix(ctx, path)
+	return lcw.Client.DeletePrefix(ctx, path)
 }
 
 func TestRemoteClusterRemove(t *testing.T) {
 	testutils.IntegrationTest(t)
 
 	ctx := context.Background()
-	kvstore.SetupDummyWithConfigOpts(t, "etcd",
+	client := kvstore.SetupDummyWithConfigOpts(t, "etcd",
 		// Explicitly set higher QPS than the default to speedup the test
 		map[string]string{kvstore.EtcdRateLimitOption: "100"},
 	)
@@ -373,16 +371,16 @@ func TestRemoteClusterRemove(t *testing.T) {
 	}
 
 	wrapper := &localClientWrapper{
-		BackendOperations: kvstore.Client(),
+		Client: client,
 		errors: map[string]uint{
 			"cilium/cache/identities/v1/foobar/": 1,
 			"cilium/cluster-config/baz":          10,
 		},
 	}
 
-	st := store.NewFactory(store.MetricsProvider())
+	st := store.NewFactory(hivetest.Logger(t), store.MetricsProvider())
 	fakeclock := baseclocktest.NewFakeClock(time.Now())
-	km := KVStoreMesh{backend: wrapper, storeFactory: st, logger: logrus.New(), clock: fakeclock}
+	km := KVStoreMesh{client: wrapper, storeFactory: st, logger: hivetest.Logger(t), clock: fakeclock}
 	rcs := make(map[string]*remoteCluster)
 	for _, cluster := range []string{"foo", "foobar", "baz"} {
 		rcs[cluster] = km.newRemoteCluster(cluster, nil).(*remoteCluster)
@@ -391,7 +389,7 @@ func TestRemoteClusterRemove(t *testing.T) {
 
 	for _, rc := range rcs {
 		for _, key := range keys(rc.name) {
-			require.NoError(t, kvstore.Client().Update(ctx, key, []byte("value"), false))
+			require.NoError(t, client.Update(ctx, key, []byte("value"), false))
 		}
 	}
 
@@ -405,13 +403,13 @@ func TestRemoteClusterRemove(t *testing.T) {
 	}
 
 	assertDeleted := func(t assert.TestingT, ctx context.Context, key string) {
-		value, err := kvstore.Client().Get(ctx, key)
+		value, err := client.Get(ctx, key)
 		assert.NoError(t, err, "Failed to retrieve kvstore key %s", key)
 		assert.Empty(t, string(value), "Key %s has not been deleted", key)
 	}
 
 	assertNotDeleted := func(t assert.TestingT, ctx context.Context, key string) {
-		value, err := kvstore.Client().Get(ctx, key)
+		value, err := client.Get(ctx, key)
 		assert.NoError(t, err, "Failed to retrieve kvstore key %s", key)
 		assert.NotEmpty(t, string(value), "Key %s has been incorrectly deleted", key)
 	}
@@ -529,19 +527,19 @@ func TestRemoteClusterRemoveShutdown(t *testing.T) {
 	testutils.IntegrationTest(t)
 
 	ctx := context.Background()
-	kvstore.SetupDummyWithConfigOpts(t, "etcd",
+	client := kvstore.SetupDummyWithConfigOpts(t, "etcd",
 		// Explicitly set higher QPS than the default to speedup the test
 		map[string]string{kvstore.EtcdRateLimitOption: "100"},
 	)
 
 	dir := t.TempDir()
-	cfg := []byte(fmt.Sprintf("endpoints:\n- %s\n", kvstore.EtcdDummyAddress()))
+	cfg := fmt.Appendf(nil, "endpoints:\n- %s\n", kvstore.EtcdDummyAddress())
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "remote"), cfg, 0644))
 
 	// Let's manually create a fake cluster configuration for the remote cluster,
 	// because we are using the same kvstore. This will be used as a synchronization
 	// point to stop the hive while blocked waiting for the grace period.
-	require.NoError(t, utils.SetClusterConfig(ctx, "remote", types.CiliumClusterConfig{ID: 20}, kvstore.Client()))
+	require.NoError(t, clustercfg.Set(ctx, "remote", types.CiliumClusterConfig{ID: 20}, client))
 
 	var km *KVStoreMesh
 	h := hive.New(
@@ -551,11 +549,7 @@ func TestRemoteClusterRemoveShutdown(t *testing.T) {
 		cell.Provide(
 			func() types.ClusterInfo { return types.ClusterInfo{ID: 10, Name: "local"} },
 			func() Config { return DefaultConfig },
-			func() promise.Promise[kvstore.BackendOperations] {
-				clr, clp := promise.New[kvstore.BackendOperations]()
-				clr.Resolve(kvstore.Client())
-				return clp
-			},
+			func() (kvstore.Client, kvstore.Config) { return client, kvstore.Config{} },
 		),
 
 		cell.Invoke(func(km_ *KVStoreMesh) { km = km_ }),
@@ -579,7 +573,7 @@ func TestRemoteClusterRemoveShutdown(t *testing.T) {
 	// actually waiting for the grace period expiration.
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		key := path.Join(kvstore.ClusterConfigPrefix, "remote")
-		value, err := kvstore.Client().Get(ctx, key)
+		value, err := client.Get(ctx, key)
 		assert.NoError(c, err, "Failed to retrieve kvstore key %s", key)
 		assert.Empty(c, string(value), "Key %s has not been deleted", key)
 	}, timeout, tick)
@@ -592,7 +586,7 @@ func TestRemoteClusterRemoveShutdown(t *testing.T) {
 func TestRemoteClusterStatus(t *testing.T) {
 	testutils.IntegrationTest(t)
 
-	kvstore.SetupDummy(t, "etcd")
+	client := kvstore.SetupDummy(t, "etcd")
 
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
@@ -600,12 +594,10 @@ func TestRemoteClusterStatus(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		wg.Wait()
-
-		require.NoError(t, kvstore.Client().DeletePrefix(context.Background(), kvstore.BaseKeyPrefix))
 	})
 
 	remoteClient := &remoteEtcdClientWrapper{
-		BackendOperations: kvstore.Client(),
+		BackendOperations: client,
 		name:              "foo",
 		kvs: map[string]string{
 			"cilium/state/nodes/v1/foo/bar":          "qux0",
@@ -621,8 +613,8 @@ func TestRemoteClusterStatus(t *testing.T) {
 			"cilium/state/ip/v1/default/qux":         "qux10",
 		},
 	}
-	st := store.NewFactory(store.MetricsProvider())
-	km := KVStoreMesh{backend: kvstore.Client(), storeFactory: st, logger: logrus.New()}
+	st := store.NewFactory(hivetest.Logger(t), store.MetricsProvider())
+	km := KVStoreMesh{client: client, storeFactory: st, logger: hivetest.Logger(t)}
 
 	rc := km.newRemoteCluster("foo", func() *models.RemoteCluster {
 		return &models.RemoteCluster{
@@ -728,6 +720,7 @@ func TestRemoteClusterSync(t *testing.T) {
 				PerClusterReadyTimeout:      1 * time.Millisecond,
 				GlobalReadyTimeout:          1 * time.Millisecond,
 				DisableDrainOnDisconnection: false,
+				EnableHeartBeat:             false,
 			},
 			connect: false,
 			sync:    false,
@@ -739,6 +732,7 @@ func TestRemoteClusterSync(t *testing.T) {
 				PerClusterReadyTimeout:      5 * time.Second,
 				GlobalReadyTimeout:          1 * time.Millisecond,
 				DisableDrainOnDisconnection: false,
+				EnableHeartBeat:             false,
 			},
 			connect: true,
 			sync:    false,
@@ -756,14 +750,14 @@ func TestRemoteClusterSync(t *testing.T) {
 			km := KVStoreMesh{
 				config: tt.config,
 				common: mockClusterMesh,
-				logger: logrus.New(),
+				logger: hivetest.Logger(t),
 			}
 
 			rc := &remoteCluster{
 				name:         "foo",
 				synced:       newSynced(),
 				readyTimeout: tt.config.PerClusterReadyTimeout,
-				logger:       km.logger.WithField(logfields.ClusterName, "foo"),
+				logger:       km.logger.With(logfields.ClusterName, "foo"),
 			}
 			swgDone := rc.synced.resources.Add()
 			rc.synced.resources.Stop()

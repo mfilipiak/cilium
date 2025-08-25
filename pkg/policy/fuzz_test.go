@@ -4,6 +4,7 @@
 package policy
 
 import (
+	"log/slog"
 	"testing"
 
 	fuzz "github.com/AdaLogics/go-fuzz-headers"
@@ -30,19 +31,20 @@ func FuzzResolvePolicy(f *testing.F) {
 			return
 		}
 
-		td := newTestData().withIDs(ruleTestIDs)
+		logger := slog.New(slog.DiscardHandler)
+		td := newTestData(logger).withIDs(ruleTestIDs)
 		td.repo.mustAdd(r)
 		sp, err := td.repo.resolvePolicyLocked(idA)
 		if err != nil {
 			return
 		}
-		sp.DistillPolicy(&EndpointInfo{ID: uint64(idA.ID)}, nil)
+		sp.DistillPolicy(logger, &EndpointInfo{ID: uint64(idA.ID)}, nil)
 	})
 }
 
 func FuzzDenyPreferredInsert(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
-		keys := emptyMapState()
+		keys := emptyMapState(slog.New(slog.DiscardHandler))
 		key := Key{}
 		entry := NewMapStateEntry(types.AllowEntry())
 		ff := fuzz.NewConsumer(data)
@@ -82,8 +84,8 @@ func FuzzAccumulateMapChange(f *testing.F) {
 			proxyPort = 1
 		}
 		key := KeyForDirection(dir).WithPortProto(proto, port)
-		value := newMapStateEntry(singleRuleOrigin(EmptyStringLabels), proxyPort, 0, deny, NoAuthRequirement)
-		policyMaps := MapChanges{}
+		value := newMapStateEntry(NilRuleOrigin, proxyPort, 0, deny, NoAuthRequirement)
+		policyMaps := MapChanges{logger: slog.New(slog.DiscardHandler)}
 		policyMaps.AccumulateMapChanges(adds, deletes, []Key{key}, value)
 		policyMaps.SyncMapChanges(versioned.LatestTx)
 	})

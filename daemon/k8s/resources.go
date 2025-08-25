@@ -34,7 +34,6 @@ var (
 		cell.Provide(
 			k8s.ServiceResource,
 			k8s.EndpointsResource,
-			k8s.NamespaceResource,
 			k8s.NetworkPolicyResource,
 			k8s.CiliumNetworkPolicyResource,
 			k8s.CiliumClusterwideNetworkPolicyResource,
@@ -42,8 +41,6 @@ var (
 			k8s.CiliumNodeResource,
 			k8s.CiliumSlimEndpointResource,
 			k8s.CiliumEndpointSliceResource,
-			k8s.CiliumEnvoyConfigResource,
-			k8s.CiliumClusterwideEnvoyConfigResource,
 		),
 	)
 
@@ -88,11 +85,10 @@ type Resources struct {
 	Endpoints                        resource.Resource[*k8s.Endpoints]
 	LocalNode                        LocalNodeResource
 	LocalCiliumNode                  LocalCiliumNodeResource
-	Namespaces                       resource.Resource[*slim_corev1.Namespace]
 	NetworkPolicies                  resource.Resource[*slim_networkingv1.NetworkPolicy]
 	CiliumNetworkPolicies            resource.Resource[*cilium_api_v2.CiliumNetworkPolicy]
 	CiliumClusterwideNetworkPolicies resource.Resource[*cilium_api_v2.CiliumClusterwideNetworkPolicy]
-	CiliumCIDRGroups                 resource.Resource[*cilium_api_v2alpha1.CiliumCIDRGroup]
+	CiliumCIDRGroups                 resource.Resource[*cilium_api_v2.CiliumCIDRGroup]
 	CiliumSlimEndpoint               resource.Resource[*types.CiliumEndpoint]
 	CiliumEndpointSlice              resource.Resource[*cilium_api_v2alpha1.CiliumEndpointSlice]
 	CiliumNode                       resource.Resource[*cilium_api_v2.CiliumNode]

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/netip"
+	"slices"
 
 	"github.com/cilium/hive/cell"
 	corev1 "k8s.io/api/core/v1"
@@ -236,7 +237,7 @@ func (r *ServiceReconciler) getDesiredRoutePolicies(p ReconcileParams, desiredPe
 		}
 
 		// get desired route policies for the service
-		svcRoutePolicies, err := r.getDesiredSvcRoutePolicies(p, desiredPeerAdverts, svc, ls)
+		svcRoutePolicies, err := r.getDesiredSvcRoutePolicies(desiredPeerAdverts, svc, ls)
 		if err != nil {
 			return nil, err
 		}
@@ -252,7 +253,7 @@ func (r *ServiceReconciler) getDesiredRoutePolicies(p ReconcileParams, desiredPe
 	return desiredSvcRoutePolicies, nil
 }
 
-func (r *ServiceReconciler) getDesiredSvcRoutePolicies(p ReconcileParams, desiredPeerAdverts PeerAdvertisements, svc *slim_corev1.Service, ls sets.Set[resource.Key]) (RoutePolicyMap, error) {
+func (r *ServiceReconciler) getDesiredSvcRoutePolicies(desiredPeerAdverts PeerAdvertisements, svc *slim_corev1.Service, ls sets.Set[resource.Key]) (RoutePolicyMap, error) {
 	desiredSvcRoutePolicies := make(RoutePolicyMap)
 
 	for peer, afAdverts := range desiredPeerAdverts {
@@ -268,49 +269,21 @@ func (r *ServiceReconciler) getDesiredSvcRoutePolicies(p ReconcileParams, desire
 					continue
 				}
 
-				// LoadBalancerIP
-				lbPolicy, err := r.getLoadBalancerIPRoutePolicy(p, peer, agentFamily, svc, advert, ls)
-				if err != nil {
-					return nil, fmt.Errorf("failed to get desired LoadBalancerIP route policy: %w", err)
-				}
-				if lbPolicy != nil {
-					currentLbPolicy := desiredSvcRoutePolicies[lbPolicy.Name]
-					if currentLbPolicy != nil {
-						if lbPolicy, err = MergeRoutePolicies(currentLbPolicy, lbPolicy); err != nil {
-							return nil, err
-						}
+				for _, advertType := range []v2.BGPServiceAddressType{v2.BGPLoadBalancerIPAddr, v2.BGPExternalIPAddr, v2.BGPClusterIPAddr} {
+					policy, err := r.getServiceRoutePolicy(peer, agentFamily, svc, advert, advertType, ls)
+					if err != nil {
+						return nil, fmt.Errorf("failed to get desired %s route policy: %w", advertType, err)
 					}
-					desiredSvcRoutePolicies[lbPolicy.Name] = lbPolicy
-				}
-
-				// ExternalIP
-				extPolicy, err := r.getExternalIPRoutePolicy(p, peer, agentFamily, svc, advert, ls)
-				if err != nil {
-					return nil, fmt.Errorf("failed to get desired ExternalIP route policy: %w", err)
-				}
-				if extPolicy != nil {
-					currentExtPolicy := desiredSvcRoutePolicies[extPolicy.Name]
-					if currentExtPolicy != nil {
-						if extPolicy, err = MergeRoutePolicies(currentExtPolicy, extPolicy); err != nil {
-							return nil, err
+					if policy != nil {
+						existingPolicy := desiredSvcRoutePolicies[policy.Name]
+						if existingPolicy != nil {
+							policy, err = MergeRoutePolicies(existingPolicy, policy)
+							if err != nil {
+								return nil, fmt.Errorf("failed to merge %s route policies: %w", advertType, err)
+							}
 						}
+						desiredSvcRoutePolicies[policy.Name] = policy
 					}
-					desiredSvcRoutePolicies[extPolicy.Name] = extPolicy
-				}
-
-				// ClusterIP
-				clusterPolicy, err := r.getClusterIPRoutePolicy(p, peer, agentFamily, svc, advert, ls)
-				if err != nil {
-					return nil, fmt.Errorf("failed to get desired ClusterIP route policy: %w", err)
-				}
-				if clusterPolicy != nil {
-					currentClusterPolicy := desiredSvcRoutePolicies[clusterPolicy.Name]
-					if currentClusterPolicy != nil {
-						if clusterPolicy, err = MergeRoutePolicies(currentClusterPolicy, clusterPolicy); err != nil {
-							return nil, err
-						}
-					}
-					desiredSvcRoutePolicies[clusterPolicy.Name] = clusterPolicy
 				}
 			}
 		}
@@ -383,12 +356,12 @@ endpointsLoop:
 		}
 
 		svcKey := resource.Key{
-			Name:      eps.ServiceID.Name,
-			Namespace: eps.ServiceID.Namespace,
+			Name:      eps.ServiceName.Name(),
+			Namespace: eps.ServiceName.Namespace(),
 		}
 
 		for _, be := range eps.Backends {
-			if !be.Terminating && be.NodeName == localNodeName {
+			if !be.Conditions.IsTerminating() && be.NodeName == localNodeName {
 				// At least one endpoint is available on this node. We
 				// can add service to the local services set.
 				ls.Insert(svcKey)
@@ -406,8 +379,8 @@ func hasLocalEndpoints(svc *slim_corev1.Service, ls sets.Set[resource.Key]) bool
 
 func (r *ServiceReconciler) resolveSvcFromEndpoints(eps *k8s.Endpoints) (*slim_corev1.Service, bool, error) {
 	k := resource.Key{
-		Name:      eps.ServiceID.Name,
-		Namespace: eps.ServiceID.Namespace,
+		Name:      eps.ServiceName.Name(),
+		Namespace: eps.ServiceName.Namespace(),
 	}
 	return r.svcDiffStore.GetByKey(k)
 }
@@ -450,15 +423,13 @@ func (r *ServiceReconciler) diffReconciliationServiceList(p ReconcileParams) (to
 	// For externalTrafficPolicy=local, we need to take care of
 	// the endpoint changes in addition to the service changes.
 	// Take a diff of the EPs and get affected services.
-	// We don't handle service deletion here since we only see
-	// the key, we cannot resolve associated service, so we have
-	// nothing to do.
-	epsUpserted, _, err := r.epDiffStore.Diff(r.diffID(p.BGPInstance))
+	// Also upsert services with deleted endpoints to handle potential withdrawal.
+	epsUpserted, epsDeleted, err := r.epDiffStore.Diff(r.diffID(p.BGPInstance))
 	if err != nil {
 		return nil, nil, fmt.Errorf("EPs store diff: %w", err)
 	}
 
-	for _, eps := range epsUpserted {
+	for _, eps := range slices.Concat(epsUpserted, epsDeleted) {
 		svc, exists, err := r.resolveSvcFromEndpoints(eps)
 		if err != nil {
 			// Cannot resolve service from EPs. We have nothing to do here.
@@ -489,7 +460,12 @@ func (r *ServiceReconciler) diffReconciliationServiceList(p ReconcileParams) (to
 		},
 	)
 
-	return deduped, deleted, nil
+	deletedKeys := make([]resource.Key, 0, len(deleted))
+	for _, svc := range deleted {
+		deletedKeys = append(deletedKeys, resource.Key{Name: svc.Name, Namespace: svc.Namespace})
+	}
+
+	return deduped, deletedKeys, nil
 }
 
 func (r *ServiceReconciler) getDesiredPaths(p ReconcileParams, desiredPeerAdverts PeerAdvertisements, toReconcile []*slim_corev1.Service, toWithdraw []resource.Key, ls sets.Set[resource.Key]) (ResourceAFPathsMap, error) {
@@ -531,14 +507,15 @@ func (r *ServiceReconciler) getServiceAFPaths(p ReconcileParams, desiredPeerAdve
 				}
 
 				for _, prefix := range desiredPrefixes {
-					path := types.NewPathForPrefix(prefix)
-					path.Family = agentFamily
-
 					// we only add path corresponding to the family of the prefix.
 					if agentFamily.Afi == types.AfiIPv4 && prefix.Addr().Is4() {
+						path := types.NewPathForPrefix(prefix)
+						path.Family = agentFamily
 						addPathToAFPathsMap(desiredFamilyAdverts, agentFamily, path)
 					}
 					if agentFamily.Afi == types.AfiIPv6 && prefix.Addr().Is6() {
+						path := types.NewPathForPrefix(prefix)
+						path.Family = agentFamily
 						addPathToAFPathsMap(desiredFamilyAdverts, agentFamily, path)
 					}
 				}
@@ -574,18 +551,18 @@ func (r *ServiceReconciler) getServicePrefixes(svc *slim_corev1.Service, advert 
 	for _, svcAdv := range advert.Service.Addresses {
 		switch svcAdv {
 		case v2.BGPLoadBalancerIPAddr:
-			desiredRoutes = append(desiredRoutes, r.getLBSvcPaths(svc, ls)...)
+			desiredRoutes = append(desiredRoutes, r.getLBSvcPaths(svc, ls, advert)...)
 		case v2.BGPClusterIPAddr:
-			desiredRoutes = append(desiredRoutes, r.getClusterIPPaths(svc, ls)...)
+			desiredRoutes = append(desiredRoutes, r.getClusterIPPaths(svc, ls, advert)...)
 		case v2.BGPExternalIPAddr:
-			desiredRoutes = append(desiredRoutes, r.getExternalIPPaths(svc, ls)...)
+			desiredRoutes = append(desiredRoutes, r.getExternalIPPaths(svc, ls, advert)...)
 		}
 	}
 
 	return desiredRoutes, nil
 }
 
-func (r *ServiceReconciler) getExternalIPPaths(svc *slim_corev1.Service, ls sets.Set[resource.Key]) []netip.Prefix {
+func (r *ServiceReconciler) getExternalIPPaths(svc *slim_corev1.Service, ls sets.Set[resource.Key], advert v2.BGPAdvertisement) []netip.Prefix {
 	var desiredRoutes []netip.Prefix
 	// Ignore externalTrafficPolicy == Local && no local EPs.
 	if svc.Spec.ExternalTrafficPolicy == slim_corev1.ServiceExternalTrafficPolicyLocal &&
@@ -600,12 +577,16 @@ func (r *ServiceReconciler) getExternalIPPaths(svc *slim_corev1.Service, ls sets
 		if err != nil {
 			continue
 		}
-		desiredRoutes = append(desiredRoutes, netip.PrefixFrom(addr, addr.BitLen()))
+		prefix, err := addr.Prefix(getServicePrefixLength(svc, addr, advert, v2.BGPExternalIPAddr))
+		if err != nil {
+			continue
+		}
+		desiredRoutes = append(desiredRoutes, prefix)
 	}
 	return desiredRoutes
 }
 
-func (r *ServiceReconciler) getClusterIPPaths(svc *slim_corev1.Service, ls sets.Set[resource.Key]) []netip.Prefix {
+func (r *ServiceReconciler) getClusterIPPaths(svc *slim_corev1.Service, ls sets.Set[resource.Key], advert v2.BGPAdvertisement) []netip.Prefix {
 	var desiredRoutes []netip.Prefix
 	// Ignore internalTrafficPolicy == Local && no local EPs.
 	if svc.Spec.InternalTrafficPolicy != nil && *svc.Spec.InternalTrafficPolicy == slim_corev1.ServiceInternalTrafficPolicyLocal &&
@@ -630,12 +611,16 @@ func (r *ServiceReconciler) getClusterIPPaths(svc *slim_corev1.Service, ls sets.
 		if err != nil {
 			continue
 		}
-		desiredRoutes = append(desiredRoutes, netip.PrefixFrom(addr, addr.BitLen()))
+		prefix, err := addr.Prefix(getServicePrefixLength(svc, addr, advert, v2.BGPClusterIPAddr))
+		if err != nil {
+			continue
+		}
+		desiredRoutes = append(desiredRoutes, prefix)
 	}
 	return desiredRoutes
 }
 
-func (r *ServiceReconciler) getLBSvcPaths(svc *slim_corev1.Service, ls sets.Set[resource.Key]) []netip.Prefix {
+func (r *ServiceReconciler) getLBSvcPaths(svc *slim_corev1.Service, ls sets.Set[resource.Key], advert v2.BGPAdvertisement) []netip.Prefix {
 	var desiredRoutes []netip.Prefix
 	if svc.Spec.Type != slim_corev1.ServiceTypeLoadBalancer {
 		return desiredRoutes
@@ -658,189 +643,59 @@ func (r *ServiceReconciler) getLBSvcPaths(svc *slim_corev1.Service, ls sets.Set[
 		if err != nil {
 			continue
 		}
-		desiredRoutes = append(desiredRoutes, netip.PrefixFrom(addr, addr.BitLen()))
+		prefix, err := addr.Prefix(getServicePrefixLength(svc, addr, advert, v2.BGPLoadBalancerIPAddr))
+		if err != nil {
+			continue
+		}
+		desiredRoutes = append(desiredRoutes, prefix)
 	}
 	return desiredRoutes
 }
 
-func (r *ServiceReconciler) getLoadBalancerIPRoutePolicy(p ReconcileParams, peer string, family types.Family, svc *slim_corev1.Service, advert v2.BGPAdvertisement, ls sets.Set[resource.Key]) (*types.RoutePolicy, error) {
-	if svc.Spec.Type != slim_corev1.ServiceTypeLoadBalancer {
+func (r *ServiceReconciler) getServiceRoutePolicy(peer PeerID, family types.Family, svc *slim_corev1.Service, advert v2.BGPAdvertisement, advertType v2.BGPServiceAddressType, ls sets.Set[resource.Key]) (*types.RoutePolicy, error) {
+	if peer.Address == "" {
 		return nil, nil
 	}
-	// Ignore externalTrafficPolicy == Local && no local EPs.
-	if svc.Spec.ExternalTrafficPolicy == slim_corev1.ServiceExternalTrafficPolicyLocal &&
-		!hasLocalEndpoints(svc, ls) {
-		return nil, nil
-	}
-	// Ignore service managed by an unsupported LB class.
-	if svc.Spec.LoadBalancerClass != nil && *svc.Spec.LoadBalancerClass != v2.BGPLoadBalancerClass {
-		// The service is managed by a different LB class.
-		return nil, nil
+	peerAddr, err := netip.ParseAddr(peer.Address)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse peer address: %w", err)
 	}
 
-	// get the peer address
-	peerAddr, peerAddrExists, err := GetPeerAddressFromConfig(p.DesiredConfig, peer)
+	valid, err := checkServiceAdvertisement(advert, advertType)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get peer address: %w", err)
-	}
-	if !peerAddrExists {
-		return nil, nil
-	}
-
-	valid, err := checkServiceAdvertisement(advert, v2.BGPLoadBalancerIPAddr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check service advertisement: %w", err)
+		return nil, fmt.Errorf("failed to check %s advertisement: %w", advertType, err)
 	}
 	if !valid {
 		return nil, nil
 	}
 
-	var v4Prefixes, v6Prefixes types.PolicyPrefixMatchList
-	for _, ingress := range svc.Status.LoadBalancer.Ingress {
-		addr, err := netip.ParseAddr(ingress.IP)
-		if err != nil {
-			continue
-		}
-
-		if family.Afi == types.AfiIPv4 && addr.Is4() {
-			v4Prefixes = append(v4Prefixes, &types.RoutePolicyPrefixMatch{CIDR: netip.PrefixFrom(addr, addr.BitLen()), PrefixLenMin: addr.BitLen(), PrefixLenMax: addr.BitLen()})
-		}
-
-		if family.Afi == types.AfiIPv6 && addr.Is6() {
-			v6Prefixes = append(v6Prefixes, &types.RoutePolicyPrefixMatch{CIDR: netip.PrefixFrom(addr, addr.BitLen()), PrefixLenMin: addr.BitLen(), PrefixLenMax: addr.BitLen()})
-		}
+	var svcPrefixes []netip.Prefix
+	switch advertType {
+	case v2.BGPLoadBalancerIPAddr:
+		svcPrefixes = r.getLBSvcPaths(svc, ls, advert)
+	case v2.BGPExternalIPAddr:
+		svcPrefixes = r.getExternalIPPaths(svc, ls, advert)
+	case v2.BGPClusterIPAddr:
+		svcPrefixes = r.getClusterIPPaths(svc, ls, advert)
 	}
 
+	var v4Prefixes, v6Prefixes types.PolicyPrefixMatchList
+	for _, prefix := range svcPrefixes {
+		if family.Afi == types.AfiIPv4 && prefix.Addr().Is4() {
+			v4Prefixes = append(v4Prefixes, &types.RoutePolicyPrefixMatch{CIDR: prefix, PrefixLenMin: prefix.Bits(), PrefixLenMax: prefix.Bits()})
+		}
+		if family.Afi == types.AfiIPv6 && prefix.Addr().Is6() {
+			v6Prefixes = append(v6Prefixes, &types.RoutePolicyPrefixMatch{CIDR: prefix, PrefixLenMin: prefix.Bits(), PrefixLenMax: prefix.Bits()})
+		}
+	}
 	if len(v4Prefixes) == 0 && len(v6Prefixes) == 0 {
 		return nil, nil
 	}
 
-	policyName := PolicyName(peer, family.Afi.String(), advert.AdvertisementType, fmt.Sprintf("%s-%s-%s", svc.Name, svc.Namespace, v2.BGPLoadBalancerIPAddr))
+	policyName := PolicyName(peer.Name, family.Afi.String(), advert.AdvertisementType, fmt.Sprintf("%s-%s-%s", svc.Name, svc.Namespace, advertType))
 	policy, err := CreatePolicy(policyName, peerAddr, v4Prefixes, v6Prefixes, advert)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create LoadBalancer IP route policy: %w", err)
-	}
-
-	return policy, nil
-}
-
-func (r *ServiceReconciler) getExternalIPRoutePolicy(p ReconcileParams, peer string, family types.Family, svc *slim_corev1.Service, advert v2.BGPAdvertisement, ls sets.Set[resource.Key]) (*types.RoutePolicy, error) {
-	// get the peer address
-	peerAddr, peerAddrExists, err := GetPeerAddressFromConfig(p.DesiredConfig, peer)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get peer address: %w", err)
-	}
-	if !peerAddrExists {
-		return nil, nil
-	}
-
-	valid, err := checkServiceAdvertisement(advert, v2.BGPExternalIPAddr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check service advertisement: %w", err)
-	}
-
-	if !valid {
-		return nil, nil
-	}
-
-	// Ignore externalTrafficPolicy == Local && no local EPs.
-	if svc.Spec.ExternalTrafficPolicy == slim_corev1.ServiceExternalTrafficPolicyLocal &&
-		!hasLocalEndpoints(svc, ls) {
-		return nil, nil
-	}
-
-	var v4Prefixes, v6Prefixes types.PolicyPrefixMatchList
-	for _, extIP := range svc.Spec.ExternalIPs {
-		if extIP == "" {
-			continue
-		}
-		addr, err := netip.ParseAddr(extIP)
-		if err != nil {
-			continue
-		}
-
-		if family.Afi == types.AfiIPv4 && addr.Is4() {
-			v4Prefixes = append(v4Prefixes, &types.RoutePolicyPrefixMatch{CIDR: netip.PrefixFrom(addr, addr.BitLen()), PrefixLenMin: addr.BitLen(), PrefixLenMax: addr.BitLen()})
-		}
-
-		if family.Afi == types.AfiIPv6 && addr.Is6() {
-			v6Prefixes = append(v6Prefixes, &types.RoutePolicyPrefixMatch{CIDR: netip.PrefixFrom(addr, addr.BitLen()), PrefixLenMin: addr.BitLen(), PrefixLenMax: addr.BitLen()})
-		}
-	}
-
-	if len(v4Prefixes) == 0 && len(v6Prefixes) == 0 {
-		return nil, nil
-	}
-
-	policyName := PolicyName(peer, family.Afi.String(), advert.AdvertisementType, fmt.Sprintf("%s-%s-%s", svc.Name, svc.Namespace, v2.BGPExternalIPAddr))
-	policy, err := CreatePolicy(policyName, peerAddr, v4Prefixes, v6Prefixes, advert)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create external IP route policy: %w", err)
-	}
-
-	return policy, nil
-}
-
-func (r *ServiceReconciler) getClusterIPRoutePolicy(p ReconcileParams, peer string, family types.Family, svc *slim_corev1.Service, advert v2.BGPAdvertisement, ls sets.Set[resource.Key]) (*types.RoutePolicy, error) {
-	// get the peer address
-	peerAddr, peerAddrExists, err := GetPeerAddressFromConfig(p.DesiredConfig, peer)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get peer address: %w", err)
-	}
-	if !peerAddrExists {
-		return nil, nil
-	}
-
-	valid, err := checkServiceAdvertisement(advert, v2.BGPClusterIPAddr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check service advertisement: %w", err)
-	}
-
-	if !valid {
-		return nil, nil
-	}
-
-	// Ignore internalTrafficPolicy == Local && no local EPs.
-	if svc.Spec.InternalTrafficPolicy != nil && *svc.Spec.InternalTrafficPolicy == slim_corev1.ServiceInternalTrafficPolicyLocal &&
-		!hasLocalEndpoints(svc, ls) {
-		return nil, nil
-	}
-
-	var v4Prefixes, v6Prefixes types.PolicyPrefixMatchList
-
-	ips := sets.New[string]()
-	if svc.Spec.ClusterIP != "" {
-		ips.Insert(svc.Spec.ClusterIP)
-	}
-	for _, clusterIP := range svc.Spec.ClusterIPs {
-		if clusterIP == "" || clusterIP == corev1.ClusterIPNone {
-			continue
-		}
-		ips.Insert(clusterIP)
-	}
-	for _, ip := range sets.List(ips) {
-		addr, err := netip.ParseAddr(ip)
-		if err != nil {
-			continue
-		}
-
-		if family.Afi == types.AfiIPv4 && addr.Is4() {
-			v4Prefixes = append(v4Prefixes, &types.RoutePolicyPrefixMatch{CIDR: netip.PrefixFrom(addr, addr.BitLen()), PrefixLenMin: addr.BitLen(), PrefixLenMax: addr.BitLen()})
-		}
-
-		if family.Afi == types.AfiIPv6 && addr.Is6() {
-			v6Prefixes = append(v6Prefixes, &types.RoutePolicyPrefixMatch{CIDR: netip.PrefixFrom(addr, addr.BitLen()), PrefixLenMin: addr.BitLen(), PrefixLenMax: addr.BitLen()})
-		}
-	}
-
-	if len(v4Prefixes) == 0 && len(v6Prefixes) == 0 {
-		return nil, nil
-	}
-
-	policyName := PolicyName(peer, family.Afi.String(), advert.AdvertisementType, fmt.Sprintf("%s-%s-%s", svc.Name, svc.Namespace, v2.BGPClusterIPAddr))
-	policy, err := CreatePolicy(policyName, peerAddr, v4Prefixes, v6Prefixes, advert)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create cluster IP route policy: %w", err)
+		return nil, fmt.Errorf("failed to create %s IP route policy: %w", advertType, err)
 	}
 
 	return policy, nil
@@ -862,13 +717,7 @@ func checkServiceAdvertisement(advert v2.BGPAdvertisement, advertServiceType v2.
 	}
 
 	// check service type is enabled in advertisement
-	svcTypeEnabled := false
-	for _, serviceType := range advert.Service.Addresses {
-		if serviceType == advertServiceType {
-			svcTypeEnabled = true
-			break
-		}
-	}
+	svcTypeEnabled := slices.Contains(advert.Service.Addresses, advertServiceType)
 	if !svcTypeEnabled {
 		return false, nil
 	}
@@ -884,4 +733,29 @@ func serviceLabelSet(svc *slim_corev1.Service) labels.Labels {
 	svcLabels["io.kubernetes.service.name"] = svc.Name
 	svcLabels["io.kubernetes.service.namespace"] = svc.Namespace
 	return labels.Set(svcLabels)
+}
+
+func getServicePrefixLength(svc *slim_corev1.Service, addr netip.Addr, advert v2.BGPAdvertisement, addrType v2.BGPServiceAddressType) int {
+	length := addr.BitLen()
+
+	if addrType == v2.BGPClusterIPAddr {
+		// for iTP=Local, we always use the full prefix length
+		if svc.Spec.InternalTrafficPolicy != nil && *svc.Spec.InternalTrafficPolicy == slim_corev1.ServiceInternalTrafficPolicyLocal {
+			return length
+		}
+	} else {
+		// for eTP=Local, we always use the full prefix length
+		if svc.Spec.ExternalTrafficPolicy == slim_corev1.ServiceExternalTrafficPolicyLocal {
+			return length
+		}
+	}
+
+	if addr.Is4() && advert.Service.AggregationLengthIPv4 != nil {
+		length = int(*advert.Service.AggregationLengthIPv4)
+	}
+
+	if addr.Is6() && advert.Service.AggregationLengthIPv6 != nil {
+		length = int(*advert.Service.AggregationLengthIPv6)
+	}
+	return length
 }

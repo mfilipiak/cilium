@@ -6,18 +6,13 @@ package api
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 )
 
 // Exists returns true if the HTTP rule already exists in the list of rules
 func (h *PortRuleHTTP) Exists(rules L7Rules) bool {
-	for _, existingRule := range rules.HTTP {
-		if h.Equal(existingRule) {
-			return true
-		}
-	}
-
-	return false
+	return slices.ContainsFunc(rules.HTTP, h.Equal)
 }
 
 // Equal returns true if both HTTP rules are equal
@@ -62,24 +57,12 @@ func (h *HeaderMatch) Equal(o *HeaderMatch) bool {
 
 // Exists returns true if the DNS rule already exists in the list of rules
 func (d *PortRuleDNS) Exists(rules L7Rules) bool {
-	for _, existingRule := range rules.DNS {
-		if d.Equal(existingRule) {
-			return true
-		}
-	}
-
-	return false
+	return slices.ContainsFunc(rules.DNS, d.Equal)
 }
 
 // Exists returns true if the L7 rule already exists in the list of rules
 func (h *PortRuleL7) Exists(rules L7Rules) bool {
-	for _, existingRule := range rules.L7 {
-		if h.Equal(existingRule) {
-			return true
-		}
-	}
-
-	return false
+	return slices.ContainsFunc(rules.L7, h.Equal)
 }
 
 // Equal returns true if both rules are equal
@@ -103,9 +86,9 @@ func (h *PortRuleL7) Equal(o PortRuleL7) bool {
 // Validate returns an error if the layer 4 protocol is not valid
 func (l4 L4Proto) Validate() error {
 	switch l4 {
-	case ProtoAny, ProtoTCP, ProtoUDP, ProtoSCTP:
+	case ProtoAny, ProtoTCP, ProtoUDP, ProtoSCTP, ProtoVRRP, ProtoIGMP:
 	default:
-		return fmt.Errorf("invalid protocol %q, must be { tcp | udp | sctp | any }", l4)
+		return fmt.Errorf("invalid protocol %q, must be { tcp | udp | sctp | vrrp | igmp | any }", l4)
 	}
 
 	return nil

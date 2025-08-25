@@ -262,7 +262,7 @@ func TestNeighborReconciler(t *testing.T) {
 				t.Fatalf("failed to create test BgpServer: %v", err)
 			}
 			t.Cleanup(func() {
-				testSC.Server.Stop()
+				testSC.Server.Stop(context.Background(), types.StopRequest{FullDestroy: true})
 			})
 
 			r := NewNeighborReconciler(hivetest.Logger(t), tt.secretStore, &option.DaemonConfig{BGPSecretsNamespace: "bgp-secrets"}).Reconciler
@@ -295,7 +295,7 @@ func TestNeighborReconciler(t *testing.T) {
 
 			// Run the reconciler twice to ensure idempotency. This
 			// simulates the retrying behavior of the controller.
-			for i := 0; i < 2; i++ {
+			for range 2 {
 				t.Run(tt.name, func(t *testing.T) {
 					err = neighborReconciler.Reconcile(context.Background(), params)
 					if (tt.err == nil) != (err == nil) {

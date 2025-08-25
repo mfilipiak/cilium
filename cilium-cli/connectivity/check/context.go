@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/blang/semver/v4"
-	"github.com/hmarr/codeowners"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	corev1 "k8s.io/api/core/v1"
@@ -30,8 +29,9 @@ import (
 	"github.com/cilium/cilium/cilium-cli/sysdump"
 	"github.com/cilium/cilium/cilium-cli/utils/features"
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	slimcorev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	"github.com/cilium/cilium/pkg/lock"
-	"github.com/cilium/cilium/pkg/versioncheck"
+	"github.com/cilium/cilium/tools/testowners/codeowners"
 )
 
 const (
@@ -52,10 +52,12 @@ type ConnectivityTest struct {
 	// Features contains the features enabled on the running Cilium cluster
 	Features features.Set
 
-	CodeOwners codeowners.Ruleset
+	CodeOwners *codeowners.Ruleset
 
-	// ClusterName is the identifier of the local cluster.
-	ClusterName string
+	// ClusterNameLocal is the identifier of the local cluster.
+	ClusterNameLocal string
+	// ClusterNameRemote is the identifier of the destination cluster.
+	ClusterNameRemote string
 
 	// Parameters to the test suite, specified by the CLI user.
 	params Parameters
@@ -72,12 +74,15 @@ type ConnectivityTest struct {
 	echoExternalPods     map[string]Pod
 	clientPods           map[string]Pod
 	clientCPPods         map[string]Pod
+	l7LBClientPods       map[string]Pod
 	perfClientPods       []Pod
 	perfServerPod        []Pod
+	perfProfilingPods    map[string]Pod
 	PerfResults          []common.PerfSummary
 	echoServices         map[string]Service
 	echoExternalServices map[string]Service
 	ingressService       map[string]Service
+	l7LBService          map[string]Service
 	k8sService           Service
 	lrpClientPods        map[string]Pod
 	lrpBackendPods       map[string]Pod
@@ -94,8 +99,8 @@ type ConnectivityTest struct {
 
 	lastFlowTimestamps map[string]time.Time
 
-	nodes              map[string]*corev1.Node
-	controlPlaneNodes  map[string]*corev1.Node
+	nodes              map[string]*slimcorev1.Node
+	controlPlaneNodes  map[string]*slimcorev1.Node
 	nodesWithoutCilium map[string]struct{}
 	ciliumNodes        map[NodeIdentity]*ciliumv2.CiliumNode
 
@@ -209,7 +214,7 @@ func NewConnectivityTest(
 	p Parameters,
 	sysdumpHooks sysdump.Hooks,
 	logger *ConcurrentLogger,
-	owners codeowners.Ruleset,
+	owners *codeowners.Ruleset,
 ) (*ConnectivityTest, error) {
 	if err := p.validate(); err != nil {
 		return nil, err
@@ -225,8 +230,10 @@ func NewConnectivityTest(
 		echoExternalPods:         make(map[string]Pod),
 		clientPods:               make(map[string]Pod),
 		clientCPPods:             make(map[string]Pod),
+		l7LBClientPods:           make(map[string]Pod),
 		lrpClientPods:            make(map[string]Pod),
 		lrpBackendPods:           make(map[string]Pod),
+		perfProfilingPods:        make(map[string]Pod),
 		socatServerPods:          []Pod{},
 		socatClientPods:          []Pod{},
 		perfClientPods:           []Pod{},
@@ -235,10 +242,11 @@ func NewConnectivityTest(
 		echoServices:             make(map[string]Service),
 		echoExternalServices:     make(map[string]Service),
 		ingressService:           make(map[string]Service),
+		l7LBService:              make(map[string]Service),
 		hostNetNSPodsByNode:      make(map[string]Pod),
 		secondaryNetworkNodeIPv4: make(map[string]string),
 		secondaryNetworkNodeIPv6: make(map[string]string),
-		nodes:                    make(map[string]*corev1.Node),
+		nodes:                    make(map[string]*slimcorev1.Node),
 		nodesWithoutCilium:       make(map[string]struct{}),
 		ciliumNodes:              make(map[NodeIdentity]*ciliumv2.CiliumNode),
 		tests:                    []*Test{},
@@ -303,6 +311,21 @@ func (ct *ConnectivityTest) SetupAndValidate(ctx context.Context, extra SetupHoo
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
+	setupAndValidate := ct.setupAndValidate
+	if ct.Params().Perf {
+		setupAndValidate = ct.setupAndValidatePerf
+	}
+
+	if err := setupAndValidate(ctx, extra); err != nil {
+		return err
+	}
+
+	// Setup and validate all the extras coming from extended functionalities.
+	return extra.SetupAndValidate(ctx, ct)
+}
+
+func (ct *ConnectivityTest) setupAndValidate(ctx context.Context, extra SetupHooks) error {
 	if err := ct.detectSingleNode(ctx); err != nil {
 		return err
 	}
@@ -313,9 +336,6 @@ func (ct *ConnectivityTest) SetupAndValidate(ctx context.Context, extra SetupHoo
 		return err
 	}
 	if err := ct.getNodes(ctx); err != nil {
-		return err
-	}
-	if err := ct.getCiliumNodes(ctx); err != nil {
 		return err
 	}
 	// Detect Cilium version after Cilium pods have been initialized and before feature
@@ -331,13 +351,8 @@ func (ct *ConnectivityTest) SetupAndValidate(ctx context.Context, extra SetupHoo
 	}
 
 	if ct.debug() {
-		fs := make([]features.Feature, 0, len(ct.Features))
-		for f := range ct.Features {
-			fs = append(fs, f)
-		}
-		slices.Sort(fs)
 		ct.Debug("Detected features:")
-		for _, f := range fs {
+		for _, f := range slices.Sorted(maps.Keys(ct.Features)) {
 			ct.Debugf("  %s: %s", f, ct.Features[f])
 		}
 	}
@@ -350,6 +365,12 @@ func (ct *ConnectivityTest) SetupAndValidate(ctx context.Context, extra SetupHoo
 		return err
 	}
 	if err := ct.validateDeployment(ctx); err != nil {
+		return err
+	}
+	if err := ct.patchDeployment(ctx); err != nil {
+		return err
+	}
+	if err := ct.getCiliumNodes(ctx); err != nil {
 		return err
 	}
 	if ct.params.Hubble {
@@ -375,8 +396,23 @@ func (ct *ConnectivityTest) SetupAndValidate(ctx context.Context, extra SetupHoo
 		}
 	}
 
-	// Setup and validate all the extras coming from extended functionalities.
-	return extra.SetupAndValidate(ctx, ct)
+	return nil
+}
+
+func (ct *ConnectivityTest) setupAndValidatePerf(ctx context.Context, _ SetupHooks) error {
+	if err := ct.initClients(ctx); err != nil {
+		return err
+	}
+
+	if err := ct.deployPerf(ctx); err != nil {
+		return err
+	}
+
+	if err := ct.validateDeploymentPerf(ctx); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // PrintTestInfo prints connectivity test names and count.
@@ -458,7 +494,7 @@ func (ct *ConnectivityTest) PrintReport(ctx context.Context) error {
 				ct.Debugf("Flushing CT entries in %s/%s", pod.Pod.Namespace, pod.Pod.Name)
 				_, err := pod.K8sClient.ExecInPod(ctx, pod.Pod.Namespace, pod.Pod.Name, defaults.AgentContainerName, cmd)
 				if err != nil {
-					ct.Fatal("failed to flush ct entries: %w", err)
+					ct.Fatalf("failed to flush ct entries: %v", err)
 				}
 			}(ctx, ciliumPod)
 		}
@@ -510,12 +546,16 @@ func (ct *ConnectivityTest) report() error {
 			ct.Logf("Test [%s]:", t.Name())
 			for _, a := range t.failedActions() {
 				failedActions++
-				ct.Log("  ❌", a)
+				if a.failureMessage != "" {
+					ct.Logf("  🟥 %s: %s", a, a.failureMessage)
+				} else {
+					ct.Log("  ❌", a)
+				}
 				ct.LogOwners(a.Scenario())
 			}
 		}
 		if len(failed) > 0 && failedActions == 0 {
-			allScenarios := make([]ownedScenario, 0, len(failed))
+			allScenarios := make([]codeowners.Scenario, 0, len(failed))
 			for _, t := range failed {
 				for scenario := range t.scenarios {
 					allScenarios = append(allScenarios, scenario)
@@ -524,7 +564,7 @@ func (ct *ConnectivityTest) report() error {
 			if len(allScenarios) == 0 {
 				// Test failure was triggered not by a specific action
 				// failing, but some other infrastructure code.
-				allScenarios = []ownedScenario{defaultTestOwners}
+				allScenarios = []codeowners.Scenario{defaultTestOwners}
 			}
 			ct.LogOwners(allScenarios...)
 		}
@@ -532,7 +572,7 @@ func (ct *ConnectivityTest) report() error {
 		return fmt.Errorf("[%s] %d tests failed", ct.params.TestNamespace, nf)
 	}
 
-	if ct.params.Perf && !ct.params.PerfParameters.NetQos {
+	if ct.params.Perf && !ct.params.PerfParameters.NetQos && !ct.params.PerfParameters.Bandwidth {
 		ct.Header(fmt.Sprintf("🔥 Network Performance Test Summary [%s]:", ct.params.TestNamespace))
 		ct.Logf("%s", strings.Repeat("-", 200))
 		ct.Logf("📋 %-15s | %-10s | %-15s | %-15s | %-15s | %-15s | %-15s | %-15s | %-15s | %-15s | %-15s", "Scenario", "Node", "Test", "Duration", "Min", "Mean", "Max", "P50", "P90", "P99", "Transaction rate OP/s")
@@ -561,12 +601,12 @@ func (ct *ConnectivityTest) report() error {
 			}
 		}
 		ct.Logf("%s", strings.Repeat("-", 200))
-		ct.Logf("%s", strings.Repeat("-", 85))
-		ct.Logf("📋 %-15s | %-10s | %-15s | %-15s | %-15s ", "Scenario", "Node", "Test", "Duration", "Throughput Mb/s")
-		ct.Logf("%s", strings.Repeat("-", 85))
+		ct.Logf("%s", strings.Repeat("-", 88))
+		ct.Logf("📋 %-15s | %-10s | %-18s | %-15s | %-15s ", "Scenario", "Node", "Test", "Duration", "Throughput Mb/s")
+		ct.Logf("%s", strings.Repeat("-", 88))
 		for _, result := range ct.PerfResults {
 			if result.Result.ThroughputMetric != nil {
-				ct.Logf("📋 %-15s | %-10s | %-15s | %-15s | %-12.2f ",
+				ct.Logf("📋 %-15s | %-10s | %-18s | %-15s | %-12.2f ",
 					result.PerfTest.Scenario,
 					nodeString(result.PerfTest.SameNode),
 					result.PerfTest.Test,
@@ -575,7 +615,7 @@ func (ct *ConnectivityTest) report() error {
 				)
 			}
 		}
-		ct.Logf("%s", strings.Repeat("-", 85))
+		ct.Logf("%s", strings.Repeat("-", 88))
 		if ct.Params().PerfParameters.ReportDir != "" {
 			common.ExportPerfSummaries(ct.PerfResults, ct.Params().PerfParameters.ReportDir)
 		}
@@ -618,7 +658,7 @@ func (ct *ConnectivityTest) enableHubbleClient(ctx context.Context) error {
 		time.Sleep(5 * time.Second)
 		status, err = ct.hubbleClient.ServerStatus(ctx, &observer.ServerStatusRequest{})
 		if err != nil {
-			ct.Fail("Not all nodes became available to Hubble Relay: %w", err)
+			ct.Failf("Not all nodes became available to Hubble Relay: %v", err)
 			return fmt.Errorf("not all nodes became available to Hubble Relay: %w", err)
 		}
 	}
@@ -641,20 +681,35 @@ func (ct *ConnectivityTest) detectPodCIDRs() {
 			continue
 		}
 
+		// PodIPs match HostIPs given that the pod is running in host network.
+		hostIPs := pod.Pod.Status.PodIPs
+
 		for _, cidr := range n.Spec.IPAM.PodCIDRs {
-			// PodIPs match HostIPs given that the pod is running in host network.
-			for _, ip := range pod.Pod.Status.PodIPs {
-				f := features.GetIPFamily(ip.IP)
-				if strings.Contains(cidr, ":") != (f == features.IPFamilyV6) {
-					// Skip if the host IP of the pod mismatches with pod CIDR.
-					// Cannot create a route with the gateway IP family
-					// mismatching the subnet.
-					continue
-				}
-				ct.params.PodCIDRs = append(ct.params.PodCIDRs, podCIDRs{cidr, ip.IP})
+			ct.params.PodCIDRs = append(ct.params.PodCIDRs, toPodCIDRs(cidr, hostIPs...)...)
+		}
+
+		// additional IP pools from multi-pool IPAM mode
+		for _, pool := range n.Spec.IPAM.Pools.Allocated {
+			for _, podCIDR := range pool.CIDRs {
+				ct.params.PodCIDRs = append(ct.params.PodCIDRs, toPodCIDRs(string(podCIDR), hostIPs...)...)
 			}
 		}
 	}
+}
+
+func toPodCIDRs(cidr string, podIPs ...corev1.PodIP) []podCIDRs {
+	var podCIDRsInfo []podCIDRs
+	for _, ip := range podIPs {
+		f := features.GetIPFamily(ip.IP)
+		if strings.Contains(cidr, ":") != (f == features.IPFamilyV6) {
+			// Skip if the host IP of the pod mismatches with pod CIDR.
+			// Cannot create a route with the gateway IP family
+			// mismatching the subnet.
+			continue
+		}
+		podCIDRsInfo = append(podCIDRsInfo, podCIDRs{cidr, ip.IP})
+	}
+	return podCIDRsInfo
 }
 
 // detectNodeCIDRs produces one or more CIDRs that cover all nodes in the cluster.
@@ -664,7 +719,7 @@ func (ct *ConnectivityTest) detectNodeCIDRs(ctx context.Context) error {
 		return nil
 	}
 
-	nodes, err := ct.client.ListNodes(ctx, metav1.ListOptions{})
+	nodes, err := ct.client.ListSlimNodes(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to list nodes: %w", err)
 	}
@@ -674,7 +729,7 @@ func (ct *ConnectivityTest) detectNodeCIDRs(ctx context.Context) error {
 
 	for i, node := range nodes.Items {
 		for _, addr := range node.Status.Addresses {
-			if addr.Type != "InternalIP" {
+			if addr.Type != slimcorev1.NodeInternalIP {
 				continue
 			}
 
@@ -779,7 +834,6 @@ var multiClusterClientLock = lock.Mutex{}
 // otherwise, list nodes and check for NoSchedule taints, as long as we have > 1
 // schedulable nodes we will run multi-node tests.
 func (ct *ConnectivityTest) detectSingleNode(ctx context.Context) error {
-
 	if ct.params.MultiCluster != "" && ct.params.SingleNode {
 		return fmt.Errorf("single-node test can not be enabled with multi-cluster test")
 	}
@@ -805,7 +859,7 @@ func (ct *ConnectivityTest) detectSingleNode(ctx context.Context) error {
 		return nil
 	}
 
-	nodes, err := ct.client.ListNodes(ctx, metav1.ListOptions{})
+	nodes, err := ct.client.ListSlimNodes(ctx, metav1.ListOptions{})
 	if err != nil {
 		ct.Fatal("Unable to list nodes.")
 		return fmt.Errorf("unable to list nodes: %w", err)
@@ -883,10 +937,10 @@ func (ct *ConnectivityTest) initCiliumPods(ctx context.Context) error {
 }
 
 func (ct *ConnectivityTest) getNodes(ctx context.Context) error {
-	ct.nodes = make(map[string]*corev1.Node)
-	ct.controlPlaneNodes = make(map[string]*corev1.Node)
+	ct.nodes = make(map[string]*slimcorev1.Node)
+	ct.controlPlaneNodes = make(map[string]*slimcorev1.Node)
 	ct.nodesWithoutCilium = make(map[string]struct{})
-	nodeList, err := ct.client.ListNodes(ctx, metav1.ListOptions{})
+	nodeList, err := ct.client.ListSlimNodes(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("unable to list K8s Nodes: %w", err)
 	}
@@ -1048,11 +1102,11 @@ func (ct *ConnectivityTest) CiliumPods() map[string]Pod {
 	return ct.ciliumPods
 }
 
-func (ct *ConnectivityTest) Nodes() map[string]*corev1.Node {
+func (ct *ConnectivityTest) Nodes() map[string]*slimcorev1.Node {
 	return ct.nodes
 }
 
-func (ct *ConnectivityTest) ControlPlaneNodes() map[string]*corev1.Node {
+func (ct *ConnectivityTest) ControlPlaneNodes() map[string]*slimcorev1.Node {
 	return ct.controlPlaneNodes
 }
 
@@ -1066,6 +1120,10 @@ func (ct *ConnectivityTest) ClientPods() map[string]Pod {
 
 func (ct *ConnectivityTest) ControlPlaneClientPods() map[string]Pod {
 	return ct.clientCPPods
+}
+
+func (ct *ConnectivityTest) L7LBClientPods() map[string]Pod {
+	return ct.l7LBClientPods
 }
 
 func (ct *ConnectivityTest) HostNetNSPodsByNode() map[string]Pod {
@@ -1086,6 +1144,10 @@ func (ct *ConnectivityTest) PerfServerPod() []Pod {
 
 func (ct *ConnectivityTest) PerfClientPods() []Pod {
 	return ct.perfClientPods
+}
+
+func (ct *ConnectivityTest) PerfProfilingPods() map[string]Pod {
+	return ct.perfProfilingPods
 }
 
 func (ct *ConnectivityTest) SocatServerPods() []Pod {
@@ -1140,6 +1202,10 @@ func (ct *ConnectivityTest) IngressService() map[string]Service {
 	return ct.ingressService
 }
 
+func (ct *ConnectivityTest) L7LBService() map[string]Service {
+	return ct.l7LBService
+}
+
 func (ct *ConnectivityTest) K8sService() Service {
 	return ct.k8sService
 }
@@ -1185,7 +1251,7 @@ func (ct *ConnectivityTest) InternalNodeIPAddresses(ipFamily features.IPFamily) 
 	var res []netip.Addr
 	for _, node := range ct.Nodes() {
 		for _, addr := range node.Status.Addresses {
-			if addr.Type != corev1.NodeInternalIP {
+			if addr.Type != slimcorev1.NodeInternalIP {
 				continue
 			}
 			a, err := netip.ParseAddr(addr.Address)
@@ -1253,16 +1319,6 @@ func (ct *ConnectivityTest) KillMulticastTestSender() []string {
 func (ct *ConnectivityTest) ForEachIPFamily(hasNetworkPolicies bool, do func(features.IPFamily)) {
 	ipFams := features.GetIPFamilies(ct.Params().IPFamilies)
 
-	// The per-endpoint routes feature is broken with IPv6 on < v1.14 when there
-	// are any netpols installed (https://github.com/cilium/cilium/issues/23852
-	// and https://github.com/cilium/cilium/issues/23910).
-	if f, ok := ct.Feature(features.EndpointRoutes); ok &&
-		f.Enabled && hasNetworkPolicies &&
-		versioncheck.MustCompile("<1.14.0")(ct.CiliumVersion) {
-
-		ipFams = []features.IPFamily{features.IPFamilyV4}
-	}
-
 	for _, ipFam := range ipFams {
 		switch ipFam {
 		case features.IPFamilyV4:
@@ -1282,6 +1338,32 @@ func (ct *ConnectivityTest) ShouldRunConnDisruptNSTraffic() bool {
 	return ct.params.IncludeConnDisruptTestNSTraffic &&
 		ct.Features[features.NodeWithoutCilium].Enabled &&
 		(ct.Params().MultiCluster == "" || ct.Features[features.KPRNodePort].Enabled) &&
+		!ct.Features[features.KPRNodePortAcceleration].Enabled
+}
+
+func (ct *ConnectivityTest) ShouldRunConnDisruptEgressGateway() bool {
+	return ct.params.IncludeUnsafeTests &&
+		ct.params.IncludeConnDisruptTestEgressGateway &&
+		ct.Features[features.EgressGateway].Enabled &&
+		ct.Features[features.NodeWithoutCilium].Enabled &&
 		!ct.Features[features.KPRNodePortAcceleration].Enabled &&
-		(!ct.Features[features.IPsecEnabled].Enabled || !ct.Features[features.KPRNodePort].Enabled)
+		ct.params.MultiCluster == ""
+}
+
+func (ct *ConnectivityTest) IsSocketLBFull() bool {
+	socketLBEnabled, _ := ct.Features.MatchRequirements(features.RequireEnabled(features.KPRSocketLB))
+	if socketLBEnabled {
+		socketLBHostnsOnly, _ := ct.Features.MatchRequirements(features.RequireEnabled(features.KPRSocketLBHostnsOnly))
+		return !socketLBHostnsOnly
+	}
+	return false
+}
+
+func (ct *ConnectivityTest) GetPodHostIPByFamily(pod Pod, ipFam features.IPFamily) (string, error) {
+	for _, addr := range pod.Pod.Status.HostIPs {
+		if features.GetIPFamily(addr.IP) == ipFam {
+			return addr.IP, nil
+		}
+	}
+	return "", fmt.Errorf("pod doesn't have HostIP of family %s", ipFam)
 }

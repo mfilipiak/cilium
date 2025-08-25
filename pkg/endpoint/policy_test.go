@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/util/sets"
 
@@ -21,6 +23,7 @@ import (
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/api"
 	testidentity "github.com/cilium/cilium/pkg/testutils/identity"
+	testpolicy "github.com/cilium/cilium/pkg/testutils/policy"
 )
 
 // This test fuzzes the incremental update engine from an end-to-end perspective
@@ -42,7 +45,7 @@ func TestIncrementalUpdatesDuringPolicyGeneration(t *testing.T) {
 
 	idcache := make(identity.IdentityMap, testfactor)
 	fakeAllocator := testidentity.NewMockIdentityAllocator(idcache)
-	repo := policy.NewPolicyRepository(fakeAllocator.GetIdentityCache(), nil, nil, nil, api.NewPolicyMetricsNoop())
+	repo := policy.NewPolicyRepository(hivetest.Logger(t), fakeAllocator.GetIdentityCache(), nil, nil, nil, testpolicy.NewPolicyMetricsNoop())
 
 	addIdentity := func(labelKeys ...string) *identity.Identity {
 		t.Helper()
@@ -68,8 +71,8 @@ func TestIncrementalUpdatesDuringPolicyGeneration(t *testing.T) {
 
 	ep := Endpoint{
 		SecurityIdentity: podID,
-		policyGetter:     &mockPolicyGetter{repo},
-		desiredPolicy:    policy.NewEndpointPolicy(repo),
+		policyRepo:       repo,
+		desiredPolicy:    policy.NewEndpointPolicy(hivetest.Logger(t), repo),
 	}
 	ep.UpdateLogger(nil)
 
@@ -108,11 +111,11 @@ func TestIncrementalUpdatesDuringPolicyGeneration(t *testing.T) {
 	// Track all IDs we allocate so we can validate later that we never miss any
 	checkMutex := lock.Mutex{}
 	allocatedIDs := make(sets.Set[identity.NumericIdentity], testfactor)
-	done := false
+	done := atomic.Bool{}
 
 	// simulate ipcache churn: continuously allocate IDs and push them to the policy engine.
 	go func() {
-		for i := 0; i < testfactor; i++ {
+		for i := range testfactor {
 			if i%100 == 0 {
 				t.Log(i)
 			}
@@ -125,7 +128,7 @@ func TestIncrementalUpdatesDuringPolicyGeneration(t *testing.T) {
 			checkMutex.Unlock()
 
 		}
-		done = true
+		done.Store(true)
 	}()
 
 	stats := new(regenerationStatistics)
@@ -167,16 +170,8 @@ func TestIncrementalUpdatesDuringPolicyGeneration(t *testing.T) {
 
 		checkMutex.Unlock()
 
-		if done {
+		if done.Load() {
 			break
 		}
 	}
-}
-
-type mockPolicyGetter struct {
-	repo policy.PolicyRepository
-}
-
-func (m *mockPolicyGetter) GetPolicyRepository() policy.PolicyRepository {
-	return m.repo
 }

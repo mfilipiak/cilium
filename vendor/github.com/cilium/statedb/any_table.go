@@ -16,7 +16,7 @@ type AnyTable struct {
 }
 
 func (t AnyTable) NumObjects(txn ReadTxn) int {
-	indexTxn := txn.getTxn().mustIndexReadTxn(t.Meta, PrimaryIndexPos)
+	indexTxn := txn.mustIndexReadTxn(t.Meta, PrimaryIndexPos)
 	return indexTxn.Len()
 }
 
@@ -26,7 +26,7 @@ func (t AnyTable) All(txn ReadTxn) iter.Seq2[any, Revision] {
 }
 
 func (t AnyTable) AllWatch(txn ReadTxn) (iter.Seq2[any, Revision], <-chan struct{}) {
-	indexTxn := txn.getTxn().mustIndexReadTxn(t.Meta, PrimaryIndexPos)
+	indexTxn := txn.mustIndexReadTxn(t.Meta, PrimaryIndexPos)
 	return partSeq[any](indexTxn.Iterator()), indexTxn.RootWatch()
 }
 
@@ -69,8 +69,7 @@ func (t AnyTable) Get(txn ReadTxn, index string, key string) (any, Revision, boo
 		if !ok {
 			break
 		}
-		secondary, _ := decodeNonUniqueKey(k)
-		if len(secondary) == len(rawKey) {
+		if nonUniqueKey(k).secondaryLen() == len(rawKey) {
 			return obj.data, obj.revision, true, nil
 		}
 	}
@@ -129,7 +128,7 @@ func (t AnyTable) queryIndex(txn ReadTxn, index string, key string) (indexReadTx
 	if err != nil {
 		return indexReadTxn{}, nil, err
 	}
-	itxn, err := txn.getTxn().indexReadTxn(t.Meta, indexer.pos)
+	itxn, err := txn.indexReadTxn(t.Meta, indexer.pos)
 	return itxn, rawKey, err
 }
 
@@ -138,13 +137,9 @@ func (t AnyTable) Changes(txn WriteTxn) (anyChangeIterator, error) {
 }
 
 func (t AnyTable) TableHeader() []string {
-	zero := t.Meta.proto()
-	if tw, ok := zero.(TableWritable); ok {
-		return tw.TableHeader()
-	}
-	return nil
+	return t.Meta.tableHeader()
 }
 
-func (t AnyTable) Proto() any {
-	return t.Meta.proto()
+func (t AnyTable) TableRow(obj any) []string {
+	return t.Meta.tableRowAny(obj)
 }

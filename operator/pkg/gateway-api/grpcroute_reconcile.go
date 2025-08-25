@@ -30,10 +30,9 @@ import (
 // in parent Gateway for further processing.
 func (r *grpcRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	scopedLog := r.logger.With(
-		logfields.Controller, grpcRoute,
-		logfields.Resource, req.NamespacedName,
+		logfields.ParentResource, req.NamespacedName,
 	)
-	scopedLog.Info("Reconciling GRPCRoute")
+	scopedLog.InfoContext(ctx, "Reconciling GRPCRoute")
 
 	// Fetch the GRPCRoute instance
 	original := &gatewayv1.GRPCRoute{}
@@ -86,7 +85,7 @@ func (r *grpcRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		})
 
 		// run the actual validators
-		for _, fn := range []routechecks.CheckParentFunc{
+		for _, fn := range []routechecks.CheckWithParentFunc{
 			routechecks.CheckGatewayRouteKindAllowed,
 			routechecks.CheckGatewayMatchingPorts,
 			routechecks.CheckGatewayMatchingHostnames,
@@ -102,16 +101,16 @@ func (r *grpcRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				break
 			}
 		}
-	}
 
-	for _, fn := range []routechecks.CheckRuleFunc{
-		routechecks.CheckAgainstCrossNamespaceBackendReferences,
-		routechecks.CheckBackend,
-		routechecks.CheckHasServiceImportSupport,
-		routechecks.CheckBackendIsExistingService,
-	} {
-		if continueCheck, err := fn(i); err != nil || !continueCheck {
-			return r.handleReconcileErrorWithStatus(ctx, fmt.Errorf("failed to apply Backend check: %w", err), gr, original)
+		for _, fn := range []routechecks.CheckWithParentFunc{
+			routechecks.CheckAgainstCrossNamespaceBackendReferences,
+			routechecks.CheckBackend,
+			routechecks.CheckHasServiceImportSupport,
+			routechecks.CheckBackendIsExistingService,
+		} {
+			if continueCheck, err := fn(i, parent); err != nil || !continueCheck {
+				return r.handleReconcileErrorWithStatus(ctx, fmt.Errorf("failed to apply Backend check: %w", err), gr, original)
+			}
 		}
 	}
 
@@ -119,7 +118,7 @@ func (r *grpcRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, fmt.Errorf("failed to update GRPCRoute status: %w", err)
 	}
 
-	scopedLog.Info("Successfully reconciled GRPCRoute")
+	scopedLog.InfoContext(ctx, "Successfully reconciled GRPCRoute")
 	return controllerruntime.Success()
 }
 

@@ -52,12 +52,12 @@ func TestConcurrentLogger(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			logBuf := &bytes.Buffer{}
-			logger := NewConcurrentLogger(logBuf, tt.concurrency)
+			logger := NewConcurrentLogger(logBuf)
 			logger.Start()
 
 			connTests := make([]*ConnectivityTest, 0, tt.concurrency)
 			wg := &sync.WaitGroup{}
-			for i := 0; i < tt.concurrency; i++ {
+			for i := range tt.concurrency {
 				connTests = append(connTests, &ConnectivityTest{
 					params: Parameters{TestNamespace: fmt.Sprintf("namespace-%d", i)},
 					logger: logger,
@@ -66,7 +66,7 @@ func TestConcurrentLogger(t *testing.T) {
 				go func(ct *ConnectivityTest) {
 					defer wg.Done()
 					// simulate tests run for the ConnectivityTest instance
-					for j := 0; j < tt.testCount; j++ {
+					for j := range tt.testCount {
 						test := &Test{
 							ctx:  ct,
 							name: fmt.Sprintf("test-%d", j),

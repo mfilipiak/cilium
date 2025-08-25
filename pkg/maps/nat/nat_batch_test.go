@@ -13,14 +13,14 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestDumpBatch4(t *testing.T) {
+func TestPrivilegedDumpBatch4(t *testing.T) {
 	testutils.PrivilegedTest(t)
-	m := NewMap("test_snat_map", IPv4, 1<<18) // approximate default map size.
+	m := NewMap(nil, "test_snat_map", IPv4, 1<<18) // approximate default map size.
 	m.family = IPv4
 	err := m.OpenOrCreate()
 	assert.NoError(t, err)
 	defer assert.NoError(t, m.UnpinIfExists())
-	for i := 0; i < 1024+1; i++ {
+	for i := range 1024 + 1 {
 		var ip types.IPv4
 		ip[0] = byte(i)
 		ip[1] = byte(i >> 8)

@@ -257,7 +257,7 @@ func TestGetPeerState(t *testing.T) {
 			require.NoError(t, err)
 
 			t.Cleanup(func() {
-				testSC.Stop()
+				testSC.Stop(context.Background(), types.StopRequest{FullDestroy: true})
 			})
 
 			// add neighbours
@@ -320,7 +320,7 @@ func validatePeers(t *testing.T, localASN uint32, neighbors []*v2alpha1api.Ciliu
 		require.EqualValues(t, expKeepAlive, p.ConfiguredKeepAliveTimeSeconds)
 
 		if n.GracefulRestart != nil {
-			require.EqualValues(t, n.GracefulRestart.Enabled, p.GracefulRestart.Enabled)
+			require.Equal(t, n.GracefulRestart.Enabled, p.GracefulRestart.Enabled)
 			expGRRestartTime := ptr.Deref[int32](n.GracefulRestart.RestartTimeSeconds, v2alpha1api.DefaultBGPGRRestartTimeSeconds)
 			require.EqualValues(t, expGRRestartTime, p.GracefulRestart.RestartTimeSeconds)
 		} else {
@@ -362,7 +362,7 @@ func TestGetRoutes(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
-		testSC.Stop()
+		testSC.Stop(context.Background(), types.StopRequest{FullDestroy: true})
 	})
 
 	err = testSC.AddNeighbor(context.TODO(), types.ToNeighborV1(neighbor64125, ""))

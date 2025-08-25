@@ -3,16 +3,16 @@
 
 #include <bpf/ctx/unspec.h>
 #include <bpf/config/global.h>
+#include <bpf/config/node.h>
 
-#include "node_config.h"
 #include "lib/common.h"
-#include "lib/maps.h"
+#include "lib/eps.h"
 #include "lib/nat.h"
 #include "lib/trace.h"
 #include "lib/policy_log.h"
-#include "lib/pcap.h"
 #include "lib/trace_sock.h"
 #include "lib/mcast.h"
+#include "lib/vtep.h"
 
 /*
  * The __COUNTER__ macro expands to an integer value which is increasing every
@@ -55,6 +55,8 @@ add_type(struct ipv6_revnat_tuple);
 add_type(struct ipv6_revnat_entry);
 add_type(struct ipv4_frag_id);
 add_type(struct ipv4_frag_l4ports);
+add_type(struct ipv6_frag_id);
+add_type(struct ipv6_frag_l4ports);
 add_type(union macaddr);
 add_type(struct lb4_affinity_key);
 add_type(struct lb6_affinity_key);
@@ -66,18 +68,15 @@ add_type(struct edt_id);
 add_type(struct edt_info);
 add_type(struct egress_gw_policy_key);
 add_type(struct egress_gw_policy_entry);
+add_type(struct egress_gw_policy_key6);
+add_type(struct egress_gw_policy_entry6);
 add_type(struct vtep_key);
 add_type(struct vtep_value);
-add_type(struct capture4_wcard);
-add_type(struct capture6_wcard);
-add_type(struct capture_rule);
 add_type(struct srv6_vrf_key4);
 add_type(struct srv6_vrf_key6);
 add_type(struct srv6_policy_key4);
 add_type(struct srv6_policy_key6);
 add_type(struct trace_sock_notify);
-add_type(struct tunnel_key);
-add_type(struct tunnel_value);
 add_type(struct auth_key);
 add_type(struct auth_info);
 add_type(struct encrypt_config);

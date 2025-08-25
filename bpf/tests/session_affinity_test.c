@@ -8,7 +8,6 @@
 #define ENABLE_IPV4
 #define ENABLE_NODEPORT
 #define ENABLE_NODEPORT_ACCELERATION
-#define ENABLE_SESSION_AFFINITY
 
 /* Make sure we always pick backend slot 1 if we end up in backend selection. */
 #define LB_SELECTION LB_SELECTION_FIRST
@@ -118,7 +117,6 @@ int test1_setup(struct __ctx_buff *ctx)
 		struct lb4_key key;
 		struct lb4_service value;
 	} services[] = {
-		SVC_KEY_VALUE(0, 100 /* affinity timeout */, LB_LOOKUP_SCOPE_INT),
 		SVC_KEY_VALUE(0, 100 /* affinity timeout */, LB_LOOKUP_SCOPE_EXT),
 
 		SVC_KEY_VALUE(1, BACKEND_ID1, LB_LOOKUP_SCOPE_EXT),
@@ -149,20 +147,20 @@ int test1_setup(struct __ctx_buff *ctx)
 
 	/* Insert the service and backend map values */
 	for (unsigned long i = 0; i < ARRAY_SIZE(services); i++) {
-		map_update_elem(&LB4_SERVICES_MAP_V2, &services[i].key,
+		map_update_elem(&cilium_lb4_services_v2, &services[i].key,
 				&services[i].value, BPF_ANY);
 	}
 
 	for (unsigned long i = 0; i < ARRAY_SIZE(backends); i++) {
-		map_update_elem(&LB4_BACKEND_MAP, &backends[i].key,
+		map_update_elem(&cilium_lb4_backends_v3, &backends[i].key,
 				&backends[i].value, BPF_ANY);
 	}
 
 	/* Create the session affinity entry for the client */
-	map_update_elem(&LB4_AFFINITY_MAP, &aff_key, &aff_value, BPF_ANY);
+	map_update_elem(&cilium_lb4_affinity, &aff_key, &aff_value, BPF_ANY);
 
 	/* Add the affinity match entry to mark the backend as alive */
-	map_update_elem(&LB_AFFINITY_MATCH_MAP, &match_key, &zero, BPF_ANY);
+	map_update_elem(&cilium_lb_affinity_match, &match_key, &zero, BPF_ANY);
 
 	ret = craft_packet(ctx);
 	if (ret)

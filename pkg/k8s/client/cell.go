@@ -7,22 +7,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/cilium/hive/cell"
-	"github.com/cilium/hive/job"
-	"github.com/sirupsen/logrus"
 	apiext_clientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	versionapi "k8s.io/apimachinery/pkg/version"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -51,6 +48,8 @@ var Cell = cell.Module(
 	cell.Config(defaultClientParams),
 	cell.Provide(NewClientConfig),
 	cell.Provide(newClientset),
+
+	cell.Invoke(registerMappingsUpdater),
 )
 
 // client.ClientBuilderCell provides a function to create a new composite Clientset,
@@ -116,43 +115,59 @@ type compositeClientset struct {
 	*KubernetesClientset
 	*APIExtClientset
 	*CiliumClientset
-	clientsetGetters
+	ClientsetGetters
 
 	controller        *controller.Manager
 	slim              *SlimClientset
 	config            Config
-	log               logrus.FieldLogger
+	logger            *slog.Logger
 	closeAllConns     func()
-	restConfigManager restConfig
+	restConfigManager *restConfigManager
 }
 
-func newClientset(lc cell.Lifecycle, log logrus.FieldLogger, cfg Config, jobs job.Group) (Clientset, error) {
-	return newClientsetForUserAgent(lc, log, cfg, "", jobs)
+// ConfigureK8sClientsetDialer provides an optional extension point
+// to configure the dialer used by the clientset.
+type ConfigureK8sClientsetDialer interface {
+	ConfigureK8sClientsetDialer(dialer *net.Dialer)
 }
 
-func newClientsetForUserAgent(lc cell.Lifecycle, log logrus.FieldLogger, cfg Config, name string, jobs job.Group) (Clientset, error) {
-	if !cfg.isEnabled() {
-		return &compositeClientset{disabled: true}, nil
+type compositeClientsetParams struct {
+	cell.In
+
+	Logger    *slog.Logger
+	Lifecycle cell.Lifecycle
+	Config    Config
+
+	ConfigureK8sClientsetDialer ConfigureK8sClientsetDialer `optional:"true"`
+}
+
+func newClientset(params compositeClientsetParams) (Clientset, *restConfigManager, error) {
+	return newClientsetForUserAgent(params, "")
+}
+
+func newClientsetForUserAgent(params compositeClientsetParams, name string) (Clientset, *restConfigManager, error) {
+	if !params.Config.isEnabled() {
+		return &compositeClientset{disabled: true}, nil, nil
 	}
 
 	client := compositeClientset{
-		log:        log,
+		logger:     params.Logger,
 		controller: controller.NewManager(),
-		config:     cfg,
+		config:     params.Config,
 	}
 
 	var err error
-	client.restConfigManager, err = restConfigManagerInit(cfg, name, log, jobs)
+	client.restConfigManager, err = restConfigManagerInit(params.Config, name, params.Logger)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create k8s client rest configuration: %w", err)
+		return nil, nil, fmt.Errorf("unable to create k8s client rest configuration: %w", err)
 	}
 	rc := client.restConfigManager.getConfig()
 
-	defaultCloseAllConns := setDialer(cfg, rc)
+	defaultCloseAllConns := params.setDialer(rc)
 
 	httpClient, err := rest.HTTPClientFor(rc)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create k8s REST client: %w", err)
+		return nil, nil, fmt.Errorf("unable to create k8s REST client: %w", err)
 	}
 
 	// We are implementing the same logic as Kubelet, see
@@ -170,39 +185,39 @@ func newClientsetForUserAgent(lc cell.Lifecycle, log logrus.FieldLogger, cfg Con
 
 	client.slim, err = slim_clientset.NewForConfigAndClient(rc, httpClient)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create slim k8s client: %w", err)
+		return nil, nil, fmt.Errorf("unable to create slim k8s client: %w", err)
 	}
 
 	client.APIExtClientset, err = slim_apiext_clientset.NewForConfigAndClient(rc, httpClient)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create apiext k8s client: %w", err)
+		return nil, nil, fmt.Errorf("unable to create apiext k8s client: %w", err)
 	}
 
 	client.MCSAPIClientset, err = mcsapi_clientset.NewForConfigAndClient(rc, httpClient)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create mcsapi k8s client: %w", err)
+		return nil, nil, fmt.Errorf("unable to create mcsapi k8s client: %w", err)
 	}
 
 	client.KubernetesClientset, err = kubernetes.NewForConfigAndClient(rc, httpClient)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create k8s client: %w", err)
+		return nil, nil, fmt.Errorf("unable to create k8s client: %w", err)
 	}
 
-	client.clientsetGetters = clientsetGetters{&client}
+	client.ClientsetGetters = ClientsetGetters{&client}
 
 	// The cilium client uses JSON marshalling.
 	rc.ContentConfig.ContentType = `application/json`
 	client.CiliumClientset, err = cilium_clientset.NewForConfigAndClient(rc, httpClient)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create cilium k8s client: %w", err)
+		return nil, nil, fmt.Errorf("unable to create cilium k8s client: %w", err)
 	}
 
-	lc.Append(cell.Hook{
+	params.Lifecycle.Append(cell.Hook{
 		OnStart: client.onStart,
 		OnStop:  client.onStop,
 	})
 
-	return &client, nil
+	return &client, client.restConfigManager, nil
 }
 
 func (c *compositeClientset) Slim() slim_clientset.Interface {
@@ -243,7 +258,7 @@ func (c *compositeClientset) onStart(startCtx cell.HookContext) error {
 	c.startHeartbeat()
 
 	// Update the global K8s clients, K8s version and the capabilities.
-	if err := k8sversion.Update(c, c.config.EnableK8sAPIDiscovery); err != nil {
+	if err := k8sversion.Update(c.logger, c, c.config.EnableK8sAPIDiscovery); err != nil {
 		return err
 	}
 
@@ -295,7 +310,7 @@ func (c *compositeClientset) startHeartbeat() {
 			Group: k8sHeartbeatControllerGroup,
 			DoFunc: func(context.Context) error {
 				runHeartbeat(
-					c.log,
+					c.logger,
 					heartBeat,
 					timeout,
 					c.closeAllConns,
@@ -314,7 +329,9 @@ func (c *compositeClientset) waitForConn(ctx context.Context) error {
 	var err error
 	wait.Until(func() {
 	retry:
-		c.log.WithField("host", c.restConfigManager.getConfig().Host).Info("Establishing connection to apiserver")
+		c.logger.Info("Establishing connection to apiserver",
+			logfields.IPAddr, c.restConfigManager.getConfig().Host,
+		)
 		err = isConnReady(c)
 		if err == nil {
 			close(stop)
@@ -332,29 +349,39 @@ func (c *compositeClientset) waitForConn(ctx context.Context) error {
 			return
 		}
 
-		c.log.WithError(err).WithField(logfields.IPAddr, c.restConfigManager.getConfig().Host).Error("Unable to contact k8s api-server")
+		c.logger.Error("Unable to contact k8s api-server",
+			logfields.IPAddr, c.restConfigManager.getConfig().Host,
+			logfields.Error, err,
+		)
 		close(stop)
 	}, connRetryInterval, stop)
 	if err == nil {
-		c.log.Info("Connected to apiserver")
+		c.logger.Info("Connected to apiserver")
 	}
 	return err
 }
 
-func setDialer(cfg Config, restConfig *rest.Config) func() {
-	if cfg.K8sClientConnectionTimeout == 0 || cfg.K8sClientConnectionKeepAlive == 0 {
-		return func() {}
-	}
-	ctx := (&net.Dialer{
+func (p *compositeClientsetParams) setDialer(restConfig *rest.Config) func() {
+	cfg := p.Config
+	innerDialer := &net.Dialer{
 		Timeout:   cfg.K8sClientConnectionTimeout,
 		KeepAlive: cfg.K8sClientConnectionKeepAlive,
-	}).DialContext
+	}
+	if p.ConfigureK8sClientsetDialer != nil {
+		p.ConfigureK8sClientsetDialer.ConfigureK8sClientsetDialer(innerDialer)
+	}
+
+	ctx := innerDialer.DialContext
+	if cfg.K8sClientConnectionTimeout == 0 || cfg.K8sClientConnectionKeepAlive == 0 {
+		restConfig.Dial = ctx
+		return func() {}
+	}
 	dialer := connrotation.NewDialer(ctx)
 	restConfig.Dial = dialer.DialContext
 	return dialer.CloseAll
 }
 
-func runHeartbeat(log logrus.FieldLogger, heartBeat func(context.Context) error, timeout time.Duration, onFailure ...func()) {
+func runHeartbeat(logger *slog.Logger, heartBeat func(context.Context) error, timeout time.Duration, onFailure ...func()) {
 	expireDate := time.Now().Add(-timeout)
 	// Don't even perform a health check if we have received a successful
 	// k8s event in the last 'timeout' duration
@@ -385,13 +412,13 @@ func runHeartbeat(log logrus.FieldLogger, heartBeat func(context.Context) error,
 	select {
 	case err := <-done:
 		if err != nil {
-			log.WithError(err).Warn("Network status error received, restarting client connections")
+			logger.Warn("Network status error received, restarting client connections", logfields.Error, err)
 			for _, fn := range onFailure {
 				fn()
 			}
 		}
 	case <-ctx.Done():
-		log.Warn("Heartbeat timed out, restarting client connections")
+		logger.Warn("Heartbeat timed out, restarting client connections")
 		for _, fn := range onFailure {
 			fn()
 		}
@@ -404,19 +431,14 @@ func isConnReady(c kubernetes.Interface) error {
 	return err
 }
 
-func toVersionInfo(rawVersion string) *versionapi.Info {
-	parts := strings.Split(rawVersion, ".")
-	return &versionapi.Info{Major: parts[0], Minor: parts[1]}
-}
-
 type ClientBuilderFunc func(name string) (Clientset, error)
 
 // NewClientBuilder returns a function that creates a new Clientset with the given
 // name appended to the user agent, or returns an error if the Clientset cannot be
 // created.
-func NewClientBuilder(lc cell.Lifecycle, log logrus.FieldLogger, cfg Config, jobs job.Group) ClientBuilderFunc {
+func NewClientBuilder(params compositeClientsetParams) ClientBuilderFunc {
 	return func(name string) (Clientset, error) {
-		c, err := newClientsetForUserAgent(lc, log, cfg, name, jobs)
+		c, _, err := newClientsetForUserAgent(params, name)
 		if err != nil {
 			return nil, err
 		}

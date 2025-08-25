@@ -25,25 +25,38 @@ import (
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
+	"github.com/cilium/cilium/pkg/loadbalancer"
 )
 
+type Aggregation struct {
+	aggregationLengthIPv4 int16
+	aggregationLengthIPv6 int16
+}
+
 var (
-	redSvcKey           = resource.Key{Name: "red-svc", Namespace: "non-default"}
-	redSvc2Key          = resource.Key{Name: "red-svc2", Namespace: "non-default"}
-	redSvcSelector      = &slim_metav1.LabelSelector{MatchLabels: map[string]string{"color": "red"}}
-	mismatchSvcSelector = &slim_metav1.LabelSelector{MatchLabels: map[string]string{"color": "blue"}}
-	ingressV4           = "192.168.0.1"
-	ingressV4Prefix     = "192.168.0.1/32"
-	externalV4          = "192.168.0.2"
-	externalV4Prefix    = "192.168.0.2/32"
-	clusterV4           = "192.168.0.3"
-	clusterV4Prefix     = "192.168.0.3/32"
-	ingressV6           = "2001:db8::1"
-	ingressV6Prefix     = "2001:db8::1/128"
-	externalV6          = "2001:db8::2"
-	externalV6Prefix    = "2001:db8::2/128"
-	clusterV6           = "2001:db8::3"
-	clusterV6Prefix     = "2001:db8::3/128"
+	redSvcKey            = resource.Key{Name: "red-svc", Namespace: "non-default"}
+	redSvc2Key           = resource.Key{Name: "red-svc2", Namespace: "non-default"}
+	redSvcSelector       = &slim_metav1.LabelSelector{MatchLabels: map[string]string{"color": "red"}}
+	mismatchSvcSelector  = &slim_metav1.LabelSelector{MatchLabels: map[string]string{"color": "blue"}}
+	ingressV4            = "192.168.0.1"
+	ingressV4Prefix      = "192.168.0.1/32"
+	ingressV4PrefixAggr  = "192.168.0.0/24"
+	externalV4           = "192.168.0.2"
+	externalV4Prefix     = "192.168.0.2/32"
+	externalV4PrefixAggr = "192.168.0.0/24"
+	clusterV4            = "192.168.0.3"
+	clusterV4Prefix      = "192.168.0.3/32"
+	clusterV4PrefixAggr  = "192.168.0.0/24"
+	ingressV6            = "2001:db8::1"
+	ingressV6Prefix      = "2001:db8::1/128"
+	ingressV6PrefixAggr  = "2001:db8::/120"
+	externalV6           = "2001:db8::2"
+	externalV6Prefix     = "2001:db8::2/128"
+	externalV6PrefixAggr = "2001:db8::/120"
+	clusterV6            = "2001:db8::3"
+	clusterV6Prefix      = "2001:db8::3/128"
+	clusterV6PrefixAggr  = "2001:db8::/120"
+	aggregation          = Aggregation{aggregationLengthIPv4: 24, aggregationLengthIPv6: 120}
 
 	redLBSvc = &slim_corev1.Service{
 		ObjectMeta: slim_metav1.ObjectMeta{
@@ -113,12 +126,34 @@ var (
 		Statements: []*types.RoutePolicyStatement{
 			{
 				Conditions: types.RoutePolicyConditions{
-					MatchNeighbors: []string{"10.10.10.1/32"},
+					MatchNeighbors: []netip.Addr{netip.MustParseAddr("10.10.10.1")},
 					MatchPrefixes: []*types.RoutePolicyPrefixMatch{
 						{
 							CIDR:         netip.MustParsePrefix(ingressV4Prefix),
 							PrefixLenMin: 32,
 							PrefixLenMax: 32,
+						},
+					},
+				},
+				Actions: types.RoutePolicyActions{
+					RouteAction:    types.RoutePolicyActionAccept,
+					AddCommunities: []string{"65535:65281"},
+				},
+			},
+		},
+	}
+	redPeer65001v4LBRPAggr = &types.RoutePolicy{
+		Name: redPeer65001v4LBRPName,
+		Type: types.RoutePolicyTypeExport,
+		Statements: []*types.RoutePolicyStatement{
+			{
+				Conditions: types.RoutePolicyConditions{
+					MatchNeighbors: []netip.Addr{netip.MustParseAddr("10.10.10.1")},
+					MatchPrefixes: []*types.RoutePolicyPrefixMatch{
+						{
+							CIDR:         netip.MustParsePrefix(ingressV4PrefixAggr),
+							PrefixLenMin: 24,
+							PrefixLenMax: 24,
 						},
 					},
 				},
@@ -145,12 +180,34 @@ var (
 		Statements: []*types.RoutePolicyStatement{
 			{
 				Conditions: types.RoutePolicyConditions{
-					MatchNeighbors: []string{"10.10.10.1/32"},
+					MatchNeighbors: []netip.Addr{netip.MustParseAddr("10.10.10.1")},
 					MatchPrefixes: []*types.RoutePolicyPrefixMatch{
 						{
 							CIDR:         netip.MustParsePrefix(ingressV6Prefix),
 							PrefixLenMin: 128,
 							PrefixLenMax: 128,
+						},
+					},
+				},
+				Actions: types.RoutePolicyActions{
+					RouteAction:    types.RoutePolicyActionAccept,
+					AddCommunities: []string{"65535:65281"},
+				},
+			},
+		},
+	}
+	redPeer65001v6LBRPAggr = &types.RoutePolicy{
+		Name: redPeer65001v6LBRPName,
+		Type: types.RoutePolicyTypeExport,
+		Statements: []*types.RoutePolicyStatement{
+			{
+				Conditions: types.RoutePolicyConditions{
+					MatchNeighbors: []netip.Addr{netip.MustParseAddr("10.10.10.1")},
+					MatchPrefixes: []*types.RoutePolicyPrefixMatch{
+						{
+							CIDR:         netip.MustParsePrefix(ingressV6PrefixAggr),
+							PrefixLenMin: 120,
+							PrefixLenMax: 120,
 						},
 					},
 				},
@@ -198,12 +255,34 @@ var (
 		Statements: []*types.RoutePolicyStatement{
 			{
 				Conditions: types.RoutePolicyConditions{
-					MatchNeighbors: []string{"10.10.10.1/32"},
+					MatchNeighbors: []netip.Addr{netip.MustParseAddr("10.10.10.1")},
 					MatchPrefixes: []*types.RoutePolicyPrefixMatch{
 						{
 							CIDR:         netip.MustParsePrefix(externalV4Prefix),
 							PrefixLenMin: 32,
 							PrefixLenMax: 32,
+						},
+					},
+				},
+				Actions: types.RoutePolicyActions{
+					RouteAction:    types.RoutePolicyActionAccept,
+					AddCommunities: []string{"65535:65281"},
+				},
+			},
+		},
+	}
+	redPeer65001v4ExtRPAggr = &types.RoutePolicy{
+		Name: redPeer65001v4ExtRPName,
+		Type: types.RoutePolicyTypeExport,
+		Statements: []*types.RoutePolicyStatement{
+			{
+				Conditions: types.RoutePolicyConditions{
+					MatchNeighbors: []netip.Addr{netip.MustParseAddr("10.10.10.1")},
+					MatchPrefixes: []*types.RoutePolicyPrefixMatch{
+						{
+							CIDR:         netip.MustParsePrefix(externalV4PrefixAggr),
+							PrefixLenMin: 24,
+							PrefixLenMax: 24,
 						},
 					},
 				},
@@ -222,12 +301,34 @@ var (
 		Statements: []*types.RoutePolicyStatement{
 			{
 				Conditions: types.RoutePolicyConditions{
-					MatchNeighbors: []string{"10.10.10.1/32"},
+					MatchNeighbors: []netip.Addr{netip.MustParseAddr("10.10.10.1")},
 					MatchPrefixes: []*types.RoutePolicyPrefixMatch{
 						{
 							CIDR:         netip.MustParsePrefix(externalV6Prefix),
 							PrefixLenMin: 128,
 							PrefixLenMax: 128,
+						},
+					},
+				},
+				Actions: types.RoutePolicyActions{
+					RouteAction:    types.RoutePolicyActionAccept,
+					AddCommunities: []string{"65535:65281"},
+				},
+			},
+		},
+	}
+	redPeer65001v6ExtRPAggr = &types.RoutePolicy{
+		Name: redPeer65001v6ExtRPName,
+		Type: types.RoutePolicyTypeExport,
+		Statements: []*types.RoutePolicyStatement{
+			{
+				Conditions: types.RoutePolicyConditions{
+					MatchNeighbors: []netip.Addr{netip.MustParseAddr("10.10.10.1")},
+					MatchPrefixes: []*types.RoutePolicyPrefixMatch{
+						{
+							CIDR:         netip.MustParsePrefix(externalV6PrefixAggr),
+							PrefixLenMin: 120,
+							PrefixLenMax: 120,
 						},
 					},
 				},
@@ -268,12 +369,34 @@ var (
 		Statements: []*types.RoutePolicyStatement{
 			{
 				Conditions: types.RoutePolicyConditions{
-					MatchNeighbors: []string{"10.10.10.1/32"},
+					MatchNeighbors: []netip.Addr{netip.MustParseAddr("10.10.10.1")},
 					MatchPrefixes: []*types.RoutePolicyPrefixMatch{
 						{
 							CIDR:         netip.MustParsePrefix(clusterV4Prefix),
 							PrefixLenMin: 32,
 							PrefixLenMax: 32,
+						},
+					},
+				},
+				Actions: types.RoutePolicyActions{
+					RouteAction:    types.RoutePolicyActionAccept,
+					AddCommunities: []string{"65535:65281"},
+				},
+			},
+		},
+	}
+	redPeer65001v4ClusterRPAggr = &types.RoutePolicy{
+		Name: redPeer65001v4ClusterRPName,
+		Type: types.RoutePolicyTypeExport,
+		Statements: []*types.RoutePolicyStatement{
+			{
+				Conditions: types.RoutePolicyConditions{
+					MatchNeighbors: []netip.Addr{netip.MustParseAddr("10.10.10.1")},
+					MatchPrefixes: []*types.RoutePolicyPrefixMatch{
+						{
+							CIDR:         netip.MustParsePrefix(clusterV4PrefixAggr),
+							PrefixLenMin: 24,
+							PrefixLenMax: 24,
 						},
 					},
 				},
@@ -292,12 +415,34 @@ var (
 		Statements: []*types.RoutePolicyStatement{
 			{
 				Conditions: types.RoutePolicyConditions{
-					MatchNeighbors: []string{"10.10.10.1/32"},
+					MatchNeighbors: []netip.Addr{netip.MustParseAddr("10.10.10.1")},
 					MatchPrefixes: []*types.RoutePolicyPrefixMatch{
 						{
 							CIDR:         netip.MustParsePrefix(clusterV6Prefix),
 							PrefixLenMin: 128,
 							PrefixLenMax: 128,
+						},
+					},
+				},
+				Actions: types.RoutePolicyActions{
+					RouteAction:    types.RoutePolicyActionAccept,
+					AddCommunities: []string{"65535:65281"},
+				},
+			},
+		},
+	}
+	redPeer65001v6ClusterRPAggr = &types.RoutePolicy{
+		Name: redPeer65001v6ClusterRPName,
+		Type: types.RoutePolicyTypeExport,
+		Statements: []*types.RoutePolicyStatement{
+			{
+				Conditions: types.RoutePolicyConditions{
+					MatchNeighbors: []netip.Addr{netip.MustParseAddr("10.10.10.1")},
+					MatchPrefixes: []*types.RoutePolicyPrefixMatch{
+						{
+							CIDR:         netip.MustParsePrefix(clusterV6PrefixAggr),
+							PrefixLenMin: 120,
+							PrefixLenMax: 120,
 						},
 					},
 				},
@@ -329,13 +474,13 @@ var (
 		},
 	}
 
-	redExternalAndClusterSvcWithITP = func(svc *slim_corev1.Service, iTP slim_corev1.ServiceInternalTrafficPolicy) *slim_corev1.Service {
+	svcWithITP = func(svc *slim_corev1.Service, iTP slim_corev1.ServiceInternalTrafficPolicy) *slim_corev1.Service {
 		cp := svc.DeepCopy()
 		cp.Spec.InternalTrafficPolicy = &iTP
 		return cp
 	}
 
-	redExternalAndClusterSvcWithETP = func(svc *slim_corev1.Service, eTP slim_corev1.ServiceExternalTrafficPolicy) *slim_corev1.Service {
+	svcWithETP = func(svc *slim_corev1.Service, eTP slim_corev1.ServiceExternalTrafficPolicy) *slim_corev1.Service {
 		cp := svc.DeepCopy()
 		cp.Spec.ExternalTrafficPolicy = eTP
 		return cp
@@ -359,7 +504,9 @@ var (
 	lbSvcAdvert = v2.BGPAdvertisement{
 		AdvertisementType: v2.BGPServiceAdvert,
 		Service: &v2.BGPServiceOptions{
-			Addresses: []v2.BGPServiceAddressType{v2.BGPLoadBalancerIPAddr},
+			Addresses:             []v2.BGPServiceAddressType{v2.BGPLoadBalancerIPAddr},
+			AggregationLengthIPv4: nil,
+			AggregationLengthIPv6: nil,
 		},
 		Attributes: &v2.BGPAttributes{
 			Communities: &v2.BGPCommunities{
@@ -369,9 +516,13 @@ var (
 		},
 	}
 
-	lbSvcAdvertWithSelector = func(selector *slim_metav1.LabelSelector) v2.BGPAdvertisement {
+	lbSvcAdvertWithSelector = func(selector *slim_metav1.LabelSelector, aggregation ...Aggregation) v2.BGPAdvertisement {
 		cp := lbSvcAdvert.DeepCopy()
 		cp.Selector = selector
+		if len(aggregation) != 0 {
+			cp.Service.AggregationLengthIPv4 = &aggregation[0].aggregationLengthIPv4
+			cp.Service.AggregationLengthIPv6 = &aggregation[0].aggregationLengthIPv6
+		}
 		return *cp
 	}
 
@@ -394,9 +545,13 @@ var (
 		},
 	}
 
-	externalSvcAdvertWithSelector = func(selector *slim_metav1.LabelSelector) v2.BGPAdvertisement {
+	externalSvcAdvertWithSelector = func(selector *slim_metav1.LabelSelector, aggregation ...Aggregation) v2.BGPAdvertisement {
 		cp := externalSvcAdvert.DeepCopy()
 		cp.Selector = selector
+		if len(aggregation) != 0 {
+			cp.Service.AggregationLengthIPv4 = &aggregation[0].aggregationLengthIPv4
+			cp.Service.AggregationLengthIPv6 = &aggregation[0].aggregationLengthIPv6
+		}
 		return *cp
 	}
 
@@ -419,9 +574,13 @@ var (
 		},
 	}
 
-	clusterIPSvcAdvertWithSelector = func(selector *slim_metav1.LabelSelector) v2.BGPAdvertisement {
+	clusterIPSvcAdvertWithSelector = func(selector *slim_metav1.LabelSelector, aggregation ...Aggregation) v2.BGPAdvertisement {
 		cp := clusterIPSvcAdvert.DeepCopy()
 		cp.Selector = selector
+		if len(aggregation) != 0 {
+			cp.Service.AggregationLengthIPv4 = &aggregation[0].aggregationLengthIPv4
+			cp.Service.AggregationLengthIPv6 = &aggregation[0].aggregationLengthIPv6
+		}
 		return *cp
 	}
 
@@ -451,16 +610,20 @@ var (
 		},
 	}
 
+	testPeerID = PeerID{
+		Name:    "red-peer-65001",
+		Address: "10.10.10.1",
+	}
+
 	eps1Local = &k8s.Endpoints{
 		ObjectMeta: slim_metav1.ObjectMeta{
 			Name:      "svc-1",
 			Namespace: "non-default",
 		},
 		EndpointSliceID: k8s.EndpointSliceID{
-			ServiceID: k8s.ServiceID{
-				Name:      redSvcKey.Name,
-				Namespace: redSvcKey.Namespace,
-			},
+			ServiceName: loadbalancer.NewServiceName(
+				redSvcKey.Namespace, redSvcKey.Name,
+			),
 			EndpointSliceName: "svc-1",
 		},
 		Backends: map[cmtypes.AddrCluster]*k8s.Backend{
@@ -479,20 +642,20 @@ var (
 			Namespace: "non-default",
 		},
 		EndpointSliceID: k8s.EndpointSliceID{
-			ServiceID: k8s.ServiceID{
-				Name:      redSvcKey.Name,
-				Namespace: redSvcKey.Namespace,
-			},
+			ServiceName: loadbalancer.NewServiceName(
+				redSvcKey.Namespace,
+				redSvcKey.Name,
+			),
 			EndpointSliceName: "svc-1",
 		},
 		Backends: map[cmtypes.AddrCluster]*k8s.Backend{
 			cmtypes.MustParseAddrCluster("10.0.0.1"): {
-				NodeName:    "node1",
-				Terminating: true,
+				NodeName:   "node1",
+				Conditions: k8s.BackendConditionTerminating,
 			},
 			cmtypes.MustParseAddrCluster("2001:db8:1000::1"): {
-				NodeName:    "node1",
-				Terminating: true,
+				NodeName:   "node1",
+				Conditions: k8s.BackendConditionTerminating,
 			},
 		},
 	}
@@ -503,10 +666,10 @@ var (
 			Namespace: "default",
 		},
 		EndpointSliceID: k8s.EndpointSliceID{
-			ServiceID: k8s.ServiceID{
-				Name:      redSvcKey.Name,
-				Namespace: redSvcKey.Namespace,
-			},
+			ServiceName: loadbalancer.NewServiceName(
+				redSvcKey.Namespace,
+				redSvcKey.Name,
+			),
 			EndpointSliceName: "svc-1",
 		},
 		Backends: map[cmtypes.AddrCluster]*k8s.Backend{
@@ -525,10 +688,10 @@ var (
 			Namespace: "default",
 		},
 		EndpointSliceID: k8s.EndpointSliceID{
-			ServiceID: k8s.ServiceID{
-				Name:      redSvcKey.Name,
-				Namespace: redSvcKey.Namespace,
-			},
+			ServiceName: loadbalancer.NewServiceName(
+				redSvcKey.Namespace,
+				redSvcKey.Name,
+			),
 			EndpointSliceName: "svc-1",
 		},
 		Backends: map[cmtypes.AddrCluster]*k8s.Backend{
@@ -567,7 +730,7 @@ func Test_ServiceLBReconciler(t *testing.T) {
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: nil,
 						{Afi: "ipv6", Safi: "unicast"}: nil,
 					},
@@ -585,7 +748,7 @@ func Test_ServiceLBReconciler(t *testing.T) {
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							lbSvcAdvertWithSelector(mismatchSvcSelector),
 						},
@@ -621,12 +784,85 @@ func Test_ServiceLBReconciler(t *testing.T) {
 					},
 				},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							lbSvcAdvertWithSelector(redSvcSelector),
 						},
 						{Afi: "ipv6", Safi: "unicast"}: []v2.BGPAdvertisement{
 							lbSvcAdvertWithSelector(redSvcSelector),
+						},
+					},
+				},
+			},
+		},
+		{
+			name:       "Service (LB) with advertisement(LB) and routes aggregation - matching labels (eTP=cluster, iTP=local)",
+			peerConfig: []*v2.CiliumBGPPeerConfig{redPeerConfig},
+			services:   []*slim_corev1.Service{svcWithITP(redLBSvcWithETP(slim_corev1.ServiceExternalTrafficPolicyCluster), slim_corev1.ServiceInternalTrafficPolicyLocal)},
+			advertisements: []*v2.CiliumBGPAdvertisement{
+				redSvcAdvertWithAdvertisements(lbSvcAdvertWithSelector(redSvcSelector, aggregation)),
+			},
+			expectedMetadata: ServiceReconcilerMetadata{
+				ServicePaths: ResourceAFPathsMap{
+					redSvcKey: AFPathsMap{
+						{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
+							ingressV4PrefixAggr: types.NewPathForPrefix(netip.MustParsePrefix(ingressV4PrefixAggr)),
+						},
+						{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
+							ingressV6PrefixAggr: types.NewPathForPrefix(netip.MustParsePrefix(ingressV6PrefixAggr)),
+						},
+					},
+				},
+				ServiceRoutePolicies: ResourceRoutePolicyMap{
+					redSvcKey: RoutePolicyMap{
+						redPeer65001v4LBRPName: redPeer65001v4LBRPAggr,
+						redPeer65001v6LBRPName: redPeer65001v6LBRPAggr,
+					},
+				},
+				ServiceAdvertisements: PeerAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
+						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
+							lbSvcAdvertWithSelector(redSvcSelector, aggregation),
+						},
+						{Afi: "ipv6", Safi: "unicast"}: []v2.BGPAdvertisement{
+							lbSvcAdvertWithSelector(redSvcSelector, aggregation),
+						},
+					},
+				},
+			},
+		},
+		{
+			name:       "Service (LB) with advertisement(LB) and routes aggregation - matching labels (eTP=local, iTP=cluster - no aggregation)",
+			peerConfig: []*v2.CiliumBGPPeerConfig{redPeerConfig},
+			services:   []*slim_corev1.Service{svcWithITP(redLBSvcWithETP(slim_corev1.ServiceExternalTrafficPolicyLocal), slim_corev1.ServiceInternalTrafficPolicyCluster)},
+			endpoints:  []*k8s.Endpoints{eps1Local},
+			advertisements: []*v2.CiliumBGPAdvertisement{
+				redSvcAdvertWithAdvertisements(lbSvcAdvertWithSelector(redSvcSelector, aggregation)),
+			},
+			expectedMetadata: ServiceReconcilerMetadata{
+				ServicePaths: ResourceAFPathsMap{
+					redSvcKey: AFPathsMap{
+						{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
+							ingressV4Prefix: types.NewPathForPrefix(netip.MustParsePrefix(ingressV4Prefix)),
+						},
+						{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
+							ingressV6Prefix: types.NewPathForPrefix(netip.MustParsePrefix(ingressV6Prefix)),
+						},
+					},
+				},
+				ServiceRoutePolicies: ResourceRoutePolicyMap{
+					redSvcKey: RoutePolicyMap{
+						redPeer65001v4LBRPName: redPeer65001v4LBRP,
+						redPeer65001v6LBRPName: redPeer65001v6LBRP,
+					},
+				},
+				ServiceAdvertisements: PeerAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
+						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
+							lbSvcAdvertWithSelector(redSvcSelector, aggregation),
+						},
+						{Afi: "ipv6", Safi: "unicast"}: []v2.BGPAdvertisement{
+							lbSvcAdvertWithSelector(redSvcSelector, aggregation),
 						},
 					},
 				},
@@ -658,7 +894,7 @@ func Test_ServiceLBReconciler(t *testing.T) {
 					},
 				},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							lbSvcAdvertWithSelector(redSvcSelector),
 						},
@@ -695,7 +931,7 @@ func Test_ServiceLBReconciler(t *testing.T) {
 					},
 				},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							lbSvcAdvertWithSelector(redSvcSelector),
 						},
@@ -718,7 +954,7 @@ func Test_ServiceLBReconciler(t *testing.T) {
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							lbSvcAdvertWithSelector(redSvcSelector),
 						},
@@ -741,7 +977,7 @@ func Test_ServiceLBReconciler(t *testing.T) {
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							lbSvcAdvertWithSelector(redSvcSelector),
 						},
@@ -776,7 +1012,7 @@ func Test_ServiceLBReconciler(t *testing.T) {
 			defer svcReconciler.Cleanup(testBGPInstance)
 
 			// reconcile twice to validate idempotency
-			for i := 0; i < 2; i++ {
+			for range 2 {
 				err := svcReconciler.Reconcile(context.Background(), ReconcileParams{
 					BGPInstance:   testBGPInstance,
 					DesiredConfig: testBGPInstanceConfig,
@@ -818,7 +1054,7 @@ func Test_ServiceExternalIPReconciler(t *testing.T) {
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: nil,
 						{Afi: "ipv6", Safi: "unicast"}: nil,
 					},
@@ -836,7 +1072,7 @@ func Test_ServiceExternalIPReconciler(t *testing.T) {
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							externalSvcAdvertWithSelector(mismatchSvcSelector),
 						},
@@ -872,12 +1108,85 @@ func Test_ServiceExternalIPReconciler(t *testing.T) {
 					},
 				},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							externalSvcAdvertWithSelector(redSvcSelector),
 						},
 						{Afi: "ipv6", Safi: "unicast"}: []v2.BGPAdvertisement{
 							externalSvcAdvertWithSelector(redSvcSelector),
+						},
+					},
+				},
+			},
+		},
+		{
+			name:       "Service (External) with advertisement(External) and routes aggregation - matching labels (eTP=cluster, iTP=local)",
+			peerConfig: []*v2.CiliumBGPPeerConfig{redPeerConfig},
+			services:   []*slim_corev1.Service{svcWithITP(redExternalSvcWithETP(slim_corev1.ServiceExternalTrafficPolicyCluster), slim_corev1.ServiceInternalTrafficPolicyLocal)},
+			advertisements: []*v2.CiliumBGPAdvertisement{
+				redSvcAdvertWithAdvertisements(externalSvcAdvertWithSelector(redSvcSelector, aggregation)),
+			},
+			expectedMetadata: ServiceReconcilerMetadata{
+				ServicePaths: ResourceAFPathsMap{
+					redSvcKey: AFPathsMap{
+						{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
+							externalV4PrefixAggr: types.NewPathForPrefix(netip.MustParsePrefix(externalV4PrefixAggr)),
+						},
+						{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
+							externalV6PrefixAggr: types.NewPathForPrefix(netip.MustParsePrefix(externalV6PrefixAggr)),
+						},
+					},
+				},
+				ServiceRoutePolicies: ResourceRoutePolicyMap{
+					redSvcKey: RoutePolicyMap{
+						redPeer65001v4ExtRPName: redPeer65001v4ExtRPAggr,
+						redPeer65001v6ExtRPName: redPeer65001v6ExtRPAggr,
+					},
+				},
+				ServiceAdvertisements: PeerAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
+						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
+							externalSvcAdvertWithSelector(redSvcSelector, aggregation),
+						},
+						{Afi: "ipv6", Safi: "unicast"}: []v2.BGPAdvertisement{
+							externalSvcAdvertWithSelector(redSvcSelector, aggregation),
+						},
+					},
+				},
+			},
+		},
+		{
+			name:       "Service (External) with advertisement(External) and routes aggregation - matching labels (eTP=local, iTP=cluster - no aggregation)",
+			peerConfig: []*v2.CiliumBGPPeerConfig{redPeerConfig},
+			services:   []*slim_corev1.Service{svcWithITP(redExternalSvcWithETP(slim_corev1.ServiceExternalTrafficPolicyLocal), slim_corev1.ServiceInternalTrafficPolicyCluster)},
+			endpoints:  []*k8s.Endpoints{eps1Local},
+			advertisements: []*v2.CiliumBGPAdvertisement{
+				redSvcAdvertWithAdvertisements(externalSvcAdvertWithSelector(redSvcSelector, aggregation)),
+			},
+			expectedMetadata: ServiceReconcilerMetadata{
+				ServicePaths: ResourceAFPathsMap{
+					redSvcKey: AFPathsMap{
+						{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
+							externalV4Prefix: types.NewPathForPrefix(netip.MustParsePrefix(externalV4Prefix)),
+						},
+						{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
+							externalV6Prefix: types.NewPathForPrefix(netip.MustParsePrefix(externalV6Prefix)),
+						},
+					},
+				},
+				ServiceRoutePolicies: ResourceRoutePolicyMap{
+					redSvcKey: RoutePolicyMap{
+						redPeer65001v4ExtRPName: redPeer65001v4ExtRP,
+						redPeer65001v6ExtRPName: redPeer65001v6ExtRP,
+					},
+				},
+				ServiceAdvertisements: PeerAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
+						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
+							externalSvcAdvertWithSelector(redSvcSelector, aggregation),
+						},
+						{Afi: "ipv6", Safi: "unicast"}: []v2.BGPAdvertisement{
+							externalSvcAdvertWithSelector(redSvcSelector, aggregation),
 						},
 					},
 				},
@@ -909,7 +1218,7 @@ func Test_ServiceExternalIPReconciler(t *testing.T) {
 					},
 				},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							externalSvcAdvertWithSelector(redSvcSelector),
 						},
@@ -946,7 +1255,7 @@ func Test_ServiceExternalIPReconciler(t *testing.T) {
 					},
 				},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							externalSvcAdvertWithSelector(redSvcSelector),
 						},
@@ -969,7 +1278,7 @@ func Test_ServiceExternalIPReconciler(t *testing.T) {
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							externalSvcAdvertWithSelector(redSvcSelector),
 						},
@@ -1037,7 +1346,7 @@ func Test_ServiceExternalIPReconciler(t *testing.T) {
 					},
 				},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							externalSvcAdvertWithSelectorAttributes(redSvcSelector, redPeer65001BgpAttributes),
 							externalSvcAdvertWithSelectorAttributes(redSvcSelector, redPeer65001BgpAttributes2),
@@ -1076,7 +1385,7 @@ func Test_ServiceExternalIPReconciler(t *testing.T) {
 			defer svcReconciler.Cleanup(testBGPInstance)
 
 			// reconcile twice to validate idempotency
-			for i := 0; i < 2; i++ {
+			for range 2 {
 				err := svcReconciler.Reconcile(context.Background(), ReconcileParams{
 					BGPInstance:   testBGPInstance,
 					DesiredConfig: testBGPInstanceConfig,
@@ -1118,7 +1427,7 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: nil,
 						{Afi: "ipv6", Safi: "unicast"}: nil,
 					},
@@ -1136,7 +1445,7 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							clusterIPSvcAdvertWithSelector(mismatchSvcSelector),
 						},
@@ -1172,7 +1481,7 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 					},
 				},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							clusterIPSvcAdvertWithSelector(redSvcSelector),
 						},
@@ -1184,7 +1493,80 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 			},
 		},
 		{
-			name:       "Service (Cluster) with advertisement(Cluster) - matching labels (eTP=local, ep on node)",
+			name:       "Service (Cluster) with advertisement(Cluster) and routes aggregation - matching labels (iTP=cluster)",
+			peerConfig: []*v2.CiliumBGPPeerConfig{redPeerConfig},
+			services:   []*slim_corev1.Service{redClusterSvcWithITP(slim_corev1.ServiceInternalTrafficPolicyCluster)},
+			advertisements: []*v2.CiliumBGPAdvertisement{
+				redSvcAdvertWithAdvertisements(clusterIPSvcAdvertWithSelector(redSvcSelector, aggregation)),
+			},
+			expectedMetadata: ServiceReconcilerMetadata{
+				ServicePaths: ResourceAFPathsMap{
+					redSvcKey: AFPathsMap{
+						{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
+							clusterV4PrefixAggr: types.NewPathForPrefix(netip.MustParsePrefix(clusterV4PrefixAggr)),
+						},
+						{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
+							clusterV6PrefixAggr: types.NewPathForPrefix(netip.MustParsePrefix(clusterV6PrefixAggr)),
+						},
+					},
+				},
+				ServiceRoutePolicies: ResourceRoutePolicyMap{
+					redSvcKey: RoutePolicyMap{
+						redPeer65001v4ClusterRPName: redPeer65001v4ClusterRPAggr,
+						redPeer65001v6ClusterRPName: redPeer65001v6ClusterRPAggr,
+					},
+				},
+				ServiceAdvertisements: PeerAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
+						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
+							clusterIPSvcAdvertWithSelector(redSvcSelector, aggregation),
+						},
+						{Afi: "ipv6", Safi: "unicast"}: []v2.BGPAdvertisement{
+							clusterIPSvcAdvertWithSelector(redSvcSelector, aggregation),
+						},
+					},
+				},
+			},
+		},
+		{
+			name:       "Service (Cluster) with advertisement(Cluster) and routes aggregation - matching labels (iTP=local - no aggregation)",
+			peerConfig: []*v2.CiliumBGPPeerConfig{redPeerConfig},
+			services:   []*slim_corev1.Service{redClusterSvcWithITP(slim_corev1.ServiceInternalTrafficPolicyLocal)},
+			endpoints:  []*k8s.Endpoints{eps1Local},
+			advertisements: []*v2.CiliumBGPAdvertisement{
+				redSvcAdvertWithAdvertisements(clusterIPSvcAdvertWithSelector(redSvcSelector, aggregation)),
+			},
+			expectedMetadata: ServiceReconcilerMetadata{
+				ServicePaths: ResourceAFPathsMap{
+					redSvcKey: AFPathsMap{
+						{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
+							clusterV4Prefix: types.NewPathForPrefix(netip.MustParsePrefix(clusterV4Prefix)),
+						},
+						{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
+							clusterV6Prefix: types.NewPathForPrefix(netip.MustParsePrefix(clusterV6Prefix)),
+						},
+					},
+				},
+				ServiceRoutePolicies: ResourceRoutePolicyMap{
+					redSvcKey: RoutePolicyMap{
+						redPeer65001v4ClusterRPName: redPeer65001v4ClusterRP,
+						redPeer65001v6ClusterRPName: redPeer65001v6ClusterRP,
+					},
+				},
+				ServiceAdvertisements: PeerAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
+						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
+							clusterIPSvcAdvertWithSelector(redSvcSelector, aggregation),
+						},
+						{Afi: "ipv6", Safi: "unicast"}: []v2.BGPAdvertisement{
+							clusterIPSvcAdvertWithSelector(redSvcSelector, aggregation),
+						},
+					},
+				},
+			},
+		},
+		{
+			name:       "Service (Cluster) with advertisement(Cluster) - matching labels (iTP=local, ep on node)",
 			peerConfig: []*v2.CiliumBGPPeerConfig{redPeerConfig},
 			services:   []*slim_corev1.Service{redClusterSvcWithITP(slim_corev1.ServiceInternalTrafficPolicyLocal)},
 			endpoints:  []*k8s.Endpoints{eps1Local},
@@ -1209,7 +1591,7 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 					},
 				},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							clusterIPSvcAdvertWithSelector(redSvcSelector),
 						},
@@ -1221,7 +1603,7 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 			},
 		},
 		{
-			name:       "Service (Cluster) with advertisement(Cluster) - matching labels (eTP=local, mixed ep)",
+			name:       "Service (Cluster) with advertisement(Cluster) - matching labels (iTP=local, mixed ep)",
 			peerConfig: []*v2.CiliumBGPPeerConfig{redPeerConfig},
 			services:   []*slim_corev1.Service{redClusterSvcWithITP(slim_corev1.ServiceInternalTrafficPolicyLocal)},
 			endpoints:  []*k8s.Endpoints{eps1Mixed},
@@ -1246,7 +1628,7 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 					},
 				},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							clusterIPSvcAdvertWithSelector(redSvcSelector),
 						},
@@ -1258,7 +1640,7 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 			},
 		},
 		{
-			name:       "Service (Cluster) with advertisement(Cluster) - matching labels (eTP=local, ep on remote)",
+			name:       "Service (Cluster) with advertisement(Cluster) - matching labels (iTP=local, ep on remote)",
 			peerConfig: []*v2.CiliumBGPPeerConfig{redPeerConfig},
 			services:   []*slim_corev1.Service{redClusterSvcWithITP(slim_corev1.ServiceInternalTrafficPolicyLocal)},
 			endpoints:  []*k8s.Endpoints{eps1Remote},
@@ -1269,7 +1651,7 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							clusterIPSvcAdvertWithSelector(redSvcSelector),
 						},
@@ -1337,7 +1719,7 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 					},
 				},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							clusterIPSvcAdvertWithSelectorAttributes(redSvcSelector, redPeer65001BgpAttributes),
 							clusterIPSvcAdvertWithSelectorAttributes(redSvcSelector, redPeer65001BgpAttributes2),
@@ -1376,7 +1758,7 @@ func Test_ServiceClusterIPReconciler(t *testing.T) {
 			defer svcReconciler.Cleanup(testBGPInstance)
 
 			// reconcile twice to validate idempotency
-			for i := 0; i < 2; i++ {
+			for range 2 {
 				err := svcReconciler.Reconcile(context.Background(), ReconcileParams{
 					BGPInstance:   testBGPInstance,
 					DesiredConfig: testBGPInstanceConfig,
@@ -1408,6 +1790,7 @@ func Test_ServiceAndAdvertisementModifications(t *testing.T) {
 		upsertAdverts    []*v2.CiliumBGPAdvertisement
 		upsertServices   []*slim_corev1.Service
 		upsertEPs        []*k8s.Endpoints
+		deleteEPs        []*k8s.Endpoints
 		expectedMetadata ServiceReconcilerMetadata
 	}{
 		{
@@ -1419,7 +1802,7 @@ func Test_ServiceAndAdvertisementModifications(t *testing.T) {
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: nil,
 						{Afi: "ipv6", Safi: "unicast"}: nil,
 					},
@@ -1463,7 +1846,7 @@ func Test_ServiceAndAdvertisementModifications(t *testing.T) {
 					},
 				},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							{
 								AdvertisementType: v2.BGPServiceAdvert,
@@ -1541,7 +1924,7 @@ func Test_ServiceAndAdvertisementModifications(t *testing.T) {
 					},
 				},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							{
 								AdvertisementType: v2.BGPServiceAdvert,
@@ -1585,8 +1968,8 @@ func Test_ServiceAndAdvertisementModifications(t *testing.T) {
 		{
 			name: "Update service (Cluster, External) traffic policy local",
 			upsertServices: []*slim_corev1.Service{
-				redExternalAndClusterSvcWithITP(
-					redExternalAndClusterSvcWithETP(redExternalAndClusterSvc, slim_corev1.ServiceExternalTrafficPolicyLocal),
+				svcWithITP(
+					svcWithETP(redExternalAndClusterSvc, slim_corev1.ServiceExternalTrafficPolicyLocal),
 					slim_corev1.ServiceInternalTrafficPolicyLocal),
 			},
 			expectedMetadata: ServiceReconcilerMetadata{
@@ -1594,7 +1977,7 @@ func Test_ServiceAndAdvertisementModifications(t *testing.T) {
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							{
 								AdvertisementType: v2.BGPServiceAdvert,
@@ -1661,7 +2044,56 @@ func Test_ServiceAndAdvertisementModifications(t *testing.T) {
 					},
 				},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
+						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
+							{
+								AdvertisementType: v2.BGPServiceAdvert,
+								Service: &v2.BGPServiceOptions{
+									Addresses: []v2.BGPServiceAddressType{
+										v2.BGPClusterIPAddr,
+										v2.BGPExternalIPAddr,
+									},
+								},
+								Selector: redSvcSelector,
+								Attributes: &v2.BGPAttributes{
+									Communities: &v2.BGPCommunities{
+										Standard:  []v2.BGPStandardCommunity{"65535:65281"},
+										WellKnown: []v2.BGPWellKnownCommunity{"no-export"},
+									},
+								},
+							},
+						},
+						{Afi: "ipv6", Safi: "unicast"}: []v2.BGPAdvertisement{
+							{
+								AdvertisementType: v2.BGPServiceAdvert,
+								Service: &v2.BGPServiceOptions{
+									Addresses: []v2.BGPServiceAddressType{
+										v2.BGPClusterIPAddr,
+										v2.BGPExternalIPAddr,
+									},
+								},
+								Selector: redSvcSelector,
+								Attributes: &v2.BGPAttributes{
+									Communities: &v2.BGPCommunities{
+										Standard:  []v2.BGPStandardCommunity{"65535:65281"},
+										WellKnown: []v2.BGPWellKnownCommunity{"no-export"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:      "Delete local endpoints (Cluster, External)",
+			deleteEPs: []*k8s.Endpoints{eps1Mixed},
+			expectedMetadata: ServiceReconcilerMetadata{
+				// Both cluster and external IPs are withdrawn since local endpoints were deleted.
+				ServicePaths:         ResourceAFPathsMap{},
+				ServiceRoutePolicies: ResourceRoutePolicyMap{},
+				ServiceAdvertisements: PeerAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							{
 								AdvertisementType: v2.BGPServiceAdvert,
@@ -1740,6 +2172,10 @@ func Test_ServiceAndAdvertisementModifications(t *testing.T) {
 			epStore.Upsert(ep)
 		}
 
+		for _, ep := range tt.deleteEPs {
+			epStore.Delete(ep)
+		}
+
 		err := svcReconciler.Reconcile(context.Background(), ReconcileParams{
 			BGPInstance:   testBGPInstance,
 			DesiredConfig: testBGPInstanceConfig,
@@ -1807,7 +2243,7 @@ func Test_ServiceVIPSharing(t *testing.T) {
 					},
 				},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							{
 								AdvertisementType: v2.BGPServiceAdvert,
@@ -1875,7 +2311,7 @@ func Test_ServiceVIPSharing(t *testing.T) {
 					},
 				},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							{
 								AdvertisementType: v2.BGPServiceAdvert,
@@ -1931,7 +2367,7 @@ func Test_ServiceVIPSharing(t *testing.T) {
 					},
 				},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							{
 								AdvertisementType: v2.BGPServiceAdvert,
@@ -1973,7 +2409,7 @@ func Test_ServiceVIPSharing(t *testing.T) {
 				ServicePaths:         ResourceAFPathsMap{},
 				ServiceRoutePolicies: ResourceRoutePolicyMap{},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							{
 								AdvertisementType: v2.BGPServiceAdvert,
@@ -2063,7 +2499,7 @@ func Test_ServiceVIPSharing(t *testing.T) {
 					},
 				},
 				ServiceAdvertisements: PeerAdvertisements{
-					"red-peer-65001": PeerFamilyAdvertisements{
+					testPeerID: PeerFamilyAdvertisements{
 						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
 							lbSvcAdvertWithSelectorAttributes(redSvcSelector, redPeer65001BgpAttributes),
 							lbSvcAdvertWithSelectorAttributes(redSvcSelector, redPeer65001BgpAttributes2),
@@ -2111,7 +2547,7 @@ func Test_ServiceVIPSharing(t *testing.T) {
 		}
 
 		for _, svc := range tt.deletetServices {
-			serviceStore.Delete(resource.Key{Name: svc.Name, Namespace: svc.Namespace})
+			serviceStore.Delete(svc)
 		}
 
 		for _, ep := range tt.upsertEPs {
@@ -2136,11 +2572,317 @@ func Test_ServiceVIPSharing(t *testing.T) {
 	}
 }
 
+func Test_ServiceAdvertisementWithPeerIPChange(t *testing.T) {
+	slog.SetLogLoggerLevel(slog.LevelDebug)
+	peerConfigs := []*v2.CiliumBGPPeerConfig{redPeerConfig}
+
+	steps := []struct {
+		name             string
+		peers            []v2.CiliumBGPNodePeer
+		upsertAdverts    []*v2.CiliumBGPAdvertisement
+		upsertServices   []*slim_corev1.Service
+		deletetServices  []*slim_corev1.Service
+		upsertEPs        []*k8s.Endpoints
+		expectedMetadata ServiceReconcilerMetadata
+	}{
+		{
+			name: "Add service and advertisement",
+			peers: []v2.CiliumBGPNodePeer{
+				{
+					Name:        "red-peer-65001",
+					PeerAddress: ptr.To[string]("10.10.10.1"),
+					PeerConfigRef: &v2.PeerConfigReference{
+						Name: "peer-config-red",
+					},
+				},
+			},
+			upsertAdverts: []*v2.CiliumBGPAdvertisement{
+				redSvcAdvertWithAdvertisements(v2.BGPAdvertisement{
+					AdvertisementType: v2.BGPServiceAdvert,
+					Service: &v2.BGPServiceOptions{
+						Addresses: []v2.BGPServiceAddressType{v2.BGPLoadBalancerIPAddr},
+					},
+					Selector: redSvcSelector,
+					Attributes: &v2.BGPAttributes{
+						Communities: &v2.BGPCommunities{
+							Standard:  []v2.BGPStandardCommunity{"65535:65281"},
+							WellKnown: []v2.BGPWellKnownCommunity{"no-export"},
+						},
+					},
+				}),
+			},
+			upsertServices: []*slim_corev1.Service{redLBSvc},
+			expectedMetadata: ServiceReconcilerMetadata{
+				ServicePaths: ResourceAFPathsMap{
+					redSvcKey: AFPathsMap{
+						{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
+							ingressV4Prefix: types.NewPathForPrefix(netip.MustParsePrefix(ingressV4Prefix)),
+						},
+						{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
+							ingressV6Prefix: types.NewPathForPrefix(netip.MustParsePrefix(ingressV6Prefix)),
+						},
+					},
+				},
+				ServiceRoutePolicies: ResourceRoutePolicyMap{
+					redSvcKey: RoutePolicyMap{
+						redPeer65001v4LBRPName: &types.RoutePolicy{
+							Name: redPeer65001v4LBRPName,
+							Type: types.RoutePolicyTypeExport,
+							Statements: []*types.RoutePolicyStatement{
+								{
+									Conditions: types.RoutePolicyConditions{
+										MatchNeighbors: []netip.Addr{netip.MustParseAddr("10.10.10.1")},
+										MatchPrefixes: []*types.RoutePolicyPrefixMatch{
+											{
+												CIDR:         netip.MustParsePrefix(ingressV4Prefix),
+												PrefixLenMin: 32,
+												PrefixLenMax: 32,
+											},
+										},
+									},
+									Actions: types.RoutePolicyActions{
+										RouteAction:    types.RoutePolicyActionAccept,
+										AddCommunities: []string{"65535:65281"},
+									},
+								},
+							},
+						},
+						redPeer65001v6LBRPName: &types.RoutePolicy{
+							Name: redPeer65001v6LBRPName,
+							Type: types.RoutePolicyTypeExport,
+							Statements: []*types.RoutePolicyStatement{
+								{
+									Conditions: types.RoutePolicyConditions{
+										MatchNeighbors: []netip.Addr{netip.MustParseAddr("10.10.10.1")},
+										MatchPrefixes: []*types.RoutePolicyPrefixMatch{
+											{
+												CIDR:         netip.MustParsePrefix(ingressV6Prefix),
+												PrefixLenMin: 128,
+												PrefixLenMax: 128,
+											},
+										},
+									},
+									Actions: types.RoutePolicyActions{
+										RouteAction:    types.RoutePolicyActionAccept,
+										AddCommunities: []string{"65535:65281"},
+									},
+								},
+							},
+						},
+					},
+				},
+				ServiceAdvertisements: PeerAdvertisements{
+					PeerID{Name: "red-peer-65001", Address: "10.10.10.1"}: PeerFamilyAdvertisements{
+						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
+							{
+								AdvertisementType: v2.BGPServiceAdvert,
+								Service: &v2.BGPServiceOptions{
+									Addresses: []v2.BGPServiceAddressType{v2.BGPLoadBalancerIPAddr},
+								},
+								Selector: redSvcSelector,
+								Attributes: &v2.BGPAttributes{
+									Communities: &v2.BGPCommunities{
+										Standard:  []v2.BGPStandardCommunity{"65535:65281"},
+										WellKnown: []v2.BGPWellKnownCommunity{"no-export"},
+									},
+								},
+							},
+						},
+						{Afi: "ipv6", Safi: "unicast"}: []v2.BGPAdvertisement{
+							{
+								AdvertisementType: v2.BGPServiceAdvert,
+								Service: &v2.BGPServiceOptions{
+									Addresses: []v2.BGPServiceAddressType{v2.BGPLoadBalancerIPAddr},
+								},
+								Selector: redSvcSelector,
+								Attributes: &v2.BGPAttributes{
+									Communities: &v2.BGPCommunities{
+										Standard:  []v2.BGPStandardCommunity{"65535:65281"},
+										WellKnown: []v2.BGPWellKnownCommunity{"no-export"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "Change peer IP address",
+			peers: []v2.CiliumBGPNodePeer{
+				{
+					Name:        "red-peer-65001",
+					PeerAddress: ptr.To[string]("10.10.10.99"),
+					PeerConfigRef: &v2.PeerConfigReference{
+						Name: "peer-config-red",
+					},
+				},
+			},
+			expectedMetadata: ServiceReconcilerMetadata{
+				ServicePaths: ResourceAFPathsMap{
+					redSvcKey: AFPathsMap{
+						{Afi: types.AfiIPv4, Safi: types.SafiUnicast}: {
+							ingressV4Prefix: types.NewPathForPrefix(netip.MustParsePrefix(ingressV4Prefix)),
+						},
+						{Afi: types.AfiIPv6, Safi: types.SafiUnicast}: {
+							ingressV6Prefix: types.NewPathForPrefix(netip.MustParsePrefix(ingressV6Prefix)),
+						},
+					},
+				},
+				ServiceRoutePolicies: ResourceRoutePolicyMap{
+					redSvcKey: RoutePolicyMap{
+						redPeer65001v4LBRPName: &types.RoutePolicy{
+							Name: redPeer65001v4LBRPName,
+							Type: types.RoutePolicyTypeExport,
+							Statements: []*types.RoutePolicyStatement{
+								{
+									Conditions: types.RoutePolicyConditions{
+										MatchNeighbors: []netip.Addr{netip.MustParseAddr("10.10.10.99")},
+										MatchPrefixes: []*types.RoutePolicyPrefixMatch{
+											{
+												CIDR:         netip.MustParsePrefix(ingressV4Prefix),
+												PrefixLenMin: 32,
+												PrefixLenMax: 32,
+											},
+										},
+									},
+									Actions: types.RoutePolicyActions{
+										RouteAction:    types.RoutePolicyActionAccept,
+										AddCommunities: []string{"65535:65281"},
+									},
+								},
+							},
+						},
+						redPeer65001v6LBRPName: &types.RoutePolicy{
+							Name: redPeer65001v6LBRPName,
+							Type: types.RoutePolicyTypeExport,
+							Statements: []*types.RoutePolicyStatement{
+								{
+									Conditions: types.RoutePolicyConditions{
+										MatchNeighbors: []netip.Addr{netip.MustParseAddr("10.10.10.99")},
+										MatchPrefixes: []*types.RoutePolicyPrefixMatch{
+											{
+												CIDR:         netip.MustParsePrefix(ingressV6Prefix),
+												PrefixLenMin: 128,
+												PrefixLenMax: 128,
+											},
+										},
+									},
+									Actions: types.RoutePolicyActions{
+										RouteAction:    types.RoutePolicyActionAccept,
+										AddCommunities: []string{"65535:65281"},
+									},
+								},
+							},
+						},
+					},
+				},
+				ServiceAdvertisements: PeerAdvertisements{
+					PeerID{Name: "red-peer-65001", Address: "10.10.10.99"}: PeerFamilyAdvertisements{
+						{Afi: "ipv4", Safi: "unicast"}: []v2.BGPAdvertisement{
+							{
+								AdvertisementType: v2.BGPServiceAdvert,
+								Service: &v2.BGPServiceOptions{
+									Addresses: []v2.BGPServiceAddressType{v2.BGPLoadBalancerIPAddr},
+								},
+								Selector: redSvcSelector,
+								Attributes: &v2.BGPAttributes{
+									Communities: &v2.BGPCommunities{
+										Standard:  []v2.BGPStandardCommunity{"65535:65281"},
+										WellKnown: []v2.BGPWellKnownCommunity{"no-export"},
+									},
+								},
+							},
+						},
+						{Afi: "ipv6", Safi: "unicast"}: []v2.BGPAdvertisement{
+							{
+								AdvertisementType: v2.BGPServiceAdvert,
+								Service: &v2.BGPServiceOptions{
+									Addresses: []v2.BGPServiceAddressType{v2.BGPLoadBalancerIPAddr},
+								},
+								Selector: redSvcSelector,
+								Attributes: &v2.BGPAttributes{
+									Communities: &v2.BGPCommunities{
+										Standard:  []v2.BGPStandardCommunity{"65535:65281"},
+										WellKnown: []v2.BGPWellKnownCommunity{"no-export"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	req := require.New(t)
+	advertStore := store.NewMockBGPCPResourceStore[*v2.CiliumBGPAdvertisement]()
+	serviceStore := store.NewFakeDiffStore[*slim_corev1.Service]()
+	epStore := store.NewFakeDiffStore[*k8s.Endpoints]()
+
+	params := ServiceReconcilerIn{
+		Logger: hivetest.Logger(t),
+		PeerAdvert: NewCiliumPeerAdvertisement(
+			PeerAdvertisementIn{
+				Logger:          hivetest.Logger(t),
+				PeerConfigStore: store.InitMockStore[*v2.CiliumBGPPeerConfig](peerConfigs),
+				AdvertStore:     advertStore,
+			}),
+		SvcDiffStore: serviceStore,
+		EPDiffStore:  epStore,
+	}
+
+	svcReconciler := NewServiceReconciler(params).Reconciler.(*ServiceReconciler)
+	testBGPInstance := instance.NewFakeBGPInstance()
+	svcReconciler.Init(testBGPInstance)
+	defer svcReconciler.Cleanup(testBGPInstance)
+
+	for _, tt := range steps {
+		t.Logf("Running step - %s", tt.name)
+
+		for _, advert := range tt.upsertAdverts {
+			advertStore.Upsert(advert)
+		}
+
+		for _, svc := range tt.upsertServices {
+			serviceStore.Upsert(svc)
+		}
+
+		for _, svc := range tt.deletetServices {
+			serviceStore.Delete(svc)
+		}
+
+		for _, ep := range tt.upsertEPs {
+			epStore.Upsert(ep)
+		}
+
+		// set peers in the node instance
+		desiredConfigCopy := testBGPInstanceConfig.DeepCopy()
+		desiredConfigCopy.Peers = tt.peers
+
+		err := svcReconciler.Reconcile(context.Background(), ReconcileParams{
+			BGPInstance:   testBGPInstance,
+			DesiredConfig: desiredConfigCopy,
+			CiliumNode:    testCiliumNodeConfig,
+		})
+		req.NoError(err)
+
+		// validate new metadata
+		serviceMetadataEqual(req, tt.expectedMetadata, svcReconciler.getMetadata(testBGPInstance))
+
+		// validate that advertised paths match expected metadata
+		advertisedPrefixesMatch(req, testBGPInstance, tt.expectedMetadata.ServicePaths)
+
+		// validate that advertised policies match expected attributes
+		advertisedPoliciesAttributesMatch(req, testBGPInstance, tt.expectedMetadata.ServiceRoutePolicies)
+	}
+}
+
 func serviceMetadataEqual(req *require.Assertions, expectedMetadata, runningMetadata ServiceReconcilerMetadata) {
 	req.Truef(PeerAdvertisementsEqual(expectedMetadata.ServiceAdvertisements, runningMetadata.ServiceAdvertisements),
 		"ServiceAdvertisements mismatch, expected: %v, got: %v", expectedMetadata.ServiceAdvertisements, runningMetadata.ServiceAdvertisements)
 
-	req.Equalf(len(expectedMetadata.ServicePaths), len(runningMetadata.ServicePaths),
+	req.Lenf(runningMetadata.ServicePaths, len(expectedMetadata.ServicePaths),
 		"ServicePaths length mismatch, expected: %v, got: %v", expectedMetadata.ServicePaths, runningMetadata.ServicePaths)
 
 	for svc, expectedSvcPaths := range expectedMetadata.ServicePaths {
@@ -2210,9 +2952,7 @@ func advertisedPoliciesAttributesMatch(
 	// Index policies by name
 	expectedPolicies := make(map[string]*types.RoutePolicy)
 	for _, routePolicyMap := range expectedResourceRoutePolicyMap {
-		for policyName, policy := range routePolicyMap {
-			expectedPolicies[policyName] = policy
-		}
+		maps.Copy(expectedPolicies, routePolicyMap)
 	}
 
 	req.Len(response.Policies, len(expectedPolicies))

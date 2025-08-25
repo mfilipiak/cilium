@@ -106,7 +106,6 @@ func (r *grpcRouteReconciler) referencedBackendService(rawObj client.Object) []s
 			backendServiceName, err := helpers.GetBackendServiceName(r.Client, namespace, backend.BackendObjectReference)
 			if err != nil {
 				r.logger.Error("Failed to get backend service name",
-					logfields.Controller, "grpcRoute",
 					logfields.Resource, client.ObjectKeyFromObject(rawObj),
 					logfields.Error, err,
 				)
@@ -170,7 +169,6 @@ func (r *grpcRouteReconciler) enqueueRequestForGateway() handler.EventHandler {
 func (r *grpcRouteReconciler) enqueueFromIndex(index string) handler.MapFunc {
 	return func(ctx context.Context, o client.Object) []reconcile.Request {
 		scopedLog := r.logger.With(
-			logfields.Controller, grpcRoute,
 			logfields.Resource, client.ObjectKeyFromObject(o),
 		)
 		list := &gatewayv1.GRPCRouteList{}
@@ -178,7 +176,7 @@ func (r *grpcRouteReconciler) enqueueFromIndex(index string) handler.MapFunc {
 		if err := r.Client.List(ctx, list, &client.ListOptions{
 			FieldSelector: fields.OneTermEqualSelector(index, client.ObjectKeyFromObject(o).String()),
 		}); err != nil {
-			scopedLog.Error("Failed to get related GRPCRoutes", logfields.Error, err)
+			scopedLog.ErrorContext(ctx, "Failed to get related GRPCRoutes", logfields.Error, err)
 			return []reconcile.Request{}
 		}
 
@@ -191,7 +189,7 @@ func (r *grpcRouteReconciler) enqueueFromIndex(index string) handler.MapFunc {
 			requests = append(requests, reconcile.Request{
 				NamespacedName: route,
 			})
-			scopedLog.Info("Enqueued GRPCRoute for resource", grpcRoute, route)
+			scopedLog.InfoContext(ctx, "Enqueued GRPCRoute for resource", grpcRoute, route)
 		}
 		return requests
 	}
@@ -200,13 +198,12 @@ func (r *grpcRouteReconciler) enqueueFromIndex(index string) handler.MapFunc {
 func (r *grpcRouteReconciler) enqueueAll() handler.MapFunc {
 	return func(ctx context.Context, o client.Object) []reconcile.Request {
 		scopedLog := r.logger.With(
-			logfields.Controller, grpcRoute,
 			logfields.Resource, client.ObjectKeyFromObject(o),
 		)
 		list := &gatewayv1.GRPCRouteList{}
 
 		if err := r.Client.List(ctx, list, &client.ListOptions{}); err != nil {
-			scopedLog.Error("Failed to get GRPCRoutes", logfields.Error, err)
+			scopedLog.ErrorContext(ctx, "Failed to get GRPCRoutes", logfields.Error, err)
 			return []reconcile.Request{}
 		}
 
@@ -219,7 +216,7 @@ func (r *grpcRouteReconciler) enqueueAll() handler.MapFunc {
 			requests = append(requests, reconcile.Request{
 				NamespacedName: route,
 			})
-			scopedLog.Info("Enqueued GRPCRoute for resource", grpcRoute, route)
+			scopedLog.InfoContext(ctx, "Enqueued GRPCRoute for resource", grpcRoute, route)
 		}
 		return requests
 	}

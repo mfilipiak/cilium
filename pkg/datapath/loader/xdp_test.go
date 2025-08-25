@@ -10,17 +10,20 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
 
 	"github.com/cilium/cilium/pkg/bpf"
+	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/testutils"
 	"github.com/cilium/cilium/pkg/testutils/netns"
 )
 
-func TestMaybeUnloadObsoleteXDPPrograms(t *testing.T) {
+func TestPrivilegedMaybeUnloadObsoleteXDPPrograms(t *testing.T) {
 	testutils.PrivilegedTest(t)
+	logger := hivetest.Logger(t)
 
 	ns := netns.NewNetNS(t)
 
@@ -49,18 +52,21 @@ func TestMaybeUnloadObsoleteXDPPrograms(t *testing.T) {
 		veth1LinkPath := bpffsDeviceLinksDir(basePath, veth1)
 		require.NoError(t, bpf.MkdirBPF(veth1LinkPath))
 		// need to use symbolFromHostNetdevXDP as progName here as maybeUnloadObsoleteXDPPrograms explicitly uses that name.
-		err = attachXDPProgram(veth0, prog, symbolFromHostNetdevXDP, veth0LinkPath, link.XDPDriverMode)
+		err = attachXDPProgram(logger, veth0, prog, symbolFromHostNetdevXDP, veth0LinkPath, link.XDPDriverMode)
 		require.NoError(t, err)
 
-		err = attachXDPProgram(veth1, prog, symbolFromHostNetdevXDP, veth1LinkPath, link.XDPDriverMode)
+		err = attachXDPProgram(logger, veth1, prog, symbolFromHostNetdevXDP, veth1LinkPath, link.XDPDriverMode)
 		require.NoError(t, err)
 
-		maybeUnloadObsoleteXDPPrograms(
+		maybeUnloadObsoleteXDPPrograms(logger,
 			[]string{"veth0"}, option.XDPModeLinkDriver, basePath,
 		)
 
 		require.NoError(t, testutils.WaitUntil(func() bool {
-			v1, err := h.LinkByName("veth1")
+			v1, err := safenetlink.WithRetryResult(func() (netlink.Link, error) {
+				//nolint:forbidigo
+				return h.LinkByName("veth1")
+			})
 			require.NoError(t, err)
 			if v1.Attrs().Xdp != nil {
 				return v1.Attrs().Xdp.Attached == false
@@ -68,7 +74,10 @@ func TestMaybeUnloadObsoleteXDPPrograms(t *testing.T) {
 			return true
 		}, time.Second))
 
-		v0, err := h.LinkByName("veth0")
+		v0, err := safenetlink.WithRetryResult(func() (netlink.Link, error) {
+			//nolint:forbidigo
+			return h.LinkByName("veth0")
+		})
 		require.NoError(t, err)
 		require.NotNil(t, v0.Attrs().Xdp)
 		require.True(t, v0.Attrs().Xdp.Attached)
@@ -84,8 +93,9 @@ func TestMaybeUnloadObsoleteXDPPrograms(t *testing.T) {
 }
 
 // Attach a program to a clean dummy device, no replacing necessary.
-func TestAttachXDP(t *testing.T) {
+func TestPrivilegedAttachXDP(t *testing.T) {
 	testutils.PrivilegedTest(t)
+	logger := hivetest.Logger(t)
 
 	ns := netns.NewNetNS(t)
 
@@ -100,7 +110,7 @@ func TestAttachXDP(t *testing.T) {
 		prog := mustXDPProgram(t, "test")
 		basePath := testutils.TempBPFFS(t)
 
-		err = attachXDPProgram(veth, prog, "test", basePath, link.XDPGenericMode)
+		err = attachXDPProgram(logger, veth, prog, "test", basePath, link.XDPGenericMode)
 		require.NoError(t, err)
 
 		err = netlink.LinkDel(veth)
@@ -111,8 +121,9 @@ func TestAttachXDP(t *testing.T) {
 }
 
 // Replace an existing program attached using netlink attach.
-func TestAttachXDPWithPreviousAttach(t *testing.T) {
+func TestPrivilegedAttachXDPWithPreviousAttach(t *testing.T) {
 	testutils.PrivilegedTest(t)
+	logger := hivetest.Logger(t)
 
 	ns := netns.NewNetNS(t)
 
@@ -130,7 +141,7 @@ func TestAttachXDPWithPreviousAttach(t *testing.T) {
 		err = netlink.LinkSetXdpFdWithFlags(veth, prog.FD(), int(link.XDPGenericMode))
 		require.NoError(t, err)
 
-		err = attachXDPProgram(veth, prog, "test", basePath, link.XDPGenericMode)
+		err = attachXDPProgram(logger, veth, prog, "test", basePath, link.XDPGenericMode)
 		require.NoError(t, err)
 
 		err = netlink.LinkDel(veth)
@@ -141,8 +152,9 @@ func TestAttachXDPWithPreviousAttach(t *testing.T) {
 }
 
 // On kernels that support it, make sure an existing bpf_link can be updated.
-func TestAttachXDPWithExistingLink(t *testing.T) {
+func TestPrivilegedAttachXDPWithExistingLink(t *testing.T) {
 	testutils.PrivilegedTest(t)
+	logger := hivetest.Logger(t)
 
 	ns := netns.NewNetNS(t)
 
@@ -175,11 +187,11 @@ func TestAttachXDPWithExistingLink(t *testing.T) {
 
 		// At this point, we know bpf_link is supported, so attachXDPProgram should
 		// use it.
-		err = attachXDPProgram(veth, prog, "test", pinDir, link.XDPGenericMode)
+		err = attachXDPProgram(logger, veth, prog, "test", pinDir, link.XDPGenericMode)
 		require.NoError(t, err)
 
 		// Attach the same program again. This should update the existing link.
-		err = attachXDPProgram(veth, prog, "test", pinDir, link.XDPGenericMode)
+		err = attachXDPProgram(logger, veth, prog, "test", pinDir, link.XDPGenericMode)
 		require.NoError(t, err)
 
 		// Detach the program.
@@ -194,7 +206,7 @@ func TestAttachXDPWithExistingLink(t *testing.T) {
 }
 
 // Detach an XDP program that was attached using netlink.
-func TestDetachXDPWithPreviousAttach(t *testing.T) {
+func TestPrivilegedDetachXDPWithPreviousAttach(t *testing.T) {
 	testutils.PrivilegedTest(t)
 
 	ns := netns.NewNetNS(t)

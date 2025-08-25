@@ -4,13 +4,12 @@
 package k8s
 
 import (
-	"net"
 	"testing"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cilium/cilium/pkg/annotation"
-	"github.com/cilium/cilium/pkg/cidr"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	"github.com/cilium/cilium/pkg/loadbalancer"
@@ -49,7 +48,7 @@ func TestParseNode(t *testing.T) {
 		},
 	}
 
-	n := ParseNode(k8sNode, source.Local)
+	n := ParseNode(hivetest.Logger(t), k8sNode, source.Local)
 	require.Equal(t, "node1", n.Name)
 	require.NotNil(t, n.IPv4AllocCIDR)
 	require.Equal(t, "10.1.0.0/16", n.IPv4AllocCIDR.String())
@@ -80,7 +79,7 @@ func TestParseNode(t *testing.T) {
 		},
 	}
 
-	n = ParseNode(k8sNode, source.Local)
+	n = ParseNode(hivetest.Logger(t), k8sNode, source.Local)
 	require.Equal(t, "node2", n.Name)
 	require.NotNil(t, n.IPv4AllocCIDR)
 	require.Equal(t, "10.1.0.0/16", n.IPv4AllocCIDR.String())
@@ -99,7 +98,7 @@ func TestParseNode(t *testing.T) {
 		},
 	}
 
-	n = ParseNode(k8sNode, source.Local)
+	n = ParseNode(hivetest.Logger(t), k8sNode, source.Local)
 	require.Equal(t, "node2", n.Name)
 	require.NotNil(t, n.IPv4AllocCIDR)
 	require.Equal(t, "10.254.0.0/16", n.IPv4AllocCIDR.String())
@@ -120,7 +119,7 @@ func TestParseNode(t *testing.T) {
 		},
 	}
 
-	n = ParseNode(k8sNode, source.Local)
+	n = ParseNode(hivetest.Logger(t), k8sNode, source.Local)
 	require.Equal(t, "node2", n.Name)
 	require.NotNil(t, n.IPv4AllocCIDR)
 	require.Equal(t, "10.1.0.0/16", n.IPv4AllocCIDR.String())
@@ -176,11 +175,11 @@ func TestParseNode(t *testing.T) {
 		},
 	}
 
-	n = ParseNode(k8sNode, source.Local)
+	n = ParseNode(hivetest.Logger(t), k8sNode, source.Local)
 	require.Equal(t, "node2", n.Name)
 	require.NotNil(t, n.IPv4AllocCIDR)
 	require.Equal(t, "10.1.0.0/16", n.IPv4AllocCIDR.String())
-	require.Equal(t, len(expected), len(n.IPAddresses))
+	require.Len(t, n.IPAddresses, len(expected))
 	addrsFound := 0
 	for _, addr := range n.IPAddresses {
 		for _, expect := range expected {
@@ -220,7 +219,7 @@ func TestParseNodeWithoutAnnotations(t *testing.T) {
 		},
 	}
 
-	n := ParseNode(k8sNode, source.Local)
+	n := ParseNode(hivetest.Logger(t), k8sNode, source.Local)
 	require.Equal(t, "node1", n.Name)
 	require.NotNil(t, n.IPv4AllocCIDR)
 	require.Equal(t, "10.1.0.0/16", n.IPv4AllocCIDR.String())
@@ -245,7 +244,7 @@ func TestParseNodeWithoutAnnotations(t *testing.T) {
 		},
 	}
 
-	n = ParseNode(k8sNode, source.Local)
+	n = ParseNode(hivetest.Logger(t), k8sNode, source.Local)
 	require.Equal(t, "node2", n.Name)
 	require.Nil(t, n.IPv4AllocCIDR)
 	require.NotNil(t, n.IPv6AllocCIDR)
@@ -336,22 +335,20 @@ func Test_ParseNodeAddressType(t *testing.T) {
 				ciliumNodeType: gotNodeAddress,
 				errExists:      gotErr != nil,
 			}
-			require.EqualValues(t, tt.want, res)
+			require.Equal(t, tt.want, res)
 		})
 	}
 }
 
 func TestParseNodeWithService(t *testing.T) {
 	oldAnnotateK8sNode := option.Config.AnnotateK8sNode
-	oldDefaultLbMode := option.Config.NodePortMode
-	oldDefaultLbAlg := option.Config.NodePortAlg
+
+	var lbConfig loadbalancer.Config
 	option.Config.AnnotateK8sNode = false
-	option.Config.NodePortMode = option.NodePortModeSNAT
-	option.Config.NodePortAlg = option.NodePortAlgRandom
+	lbConfig.LBMode = loadbalancer.LBModeSNAT
+	lbConfig.LBAlgorithm = loadbalancer.LBAlgorithmRandom
 	defer func() {
 		option.Config.AnnotateK8sNode = oldAnnotateK8sNode
-		option.Config.NodePortMode = oldDefaultLbMode
-		option.Config.NodePortAlg = oldDefaultLbAlg
 	}()
 
 	k8sNode := &slim_corev1.Node{
@@ -366,7 +363,7 @@ func TestParseNodeWithService(t *testing.T) {
 		},
 	}
 
-	n1 := ParseNode(k8sNode, source.Local)
+	n1 := ParseNode(hivetest.Logger(t), k8sNode, source.Local)
 	require.Equal(t, "node1", n1.Name)
 	require.NotNil(t, n1.IPv4AllocCIDR)
 	require.Equal(t, "10.1.0.0/16", n1.IPv4AllocCIDR.String())
@@ -381,45 +378,9 @@ func TestParseNodeWithService(t *testing.T) {
 		},
 	}
 
-	n2 := ParseNode(k8sNode, source.Local)
+	n2 := ParseNode(hivetest.Logger(t), k8sNode, source.Local)
 	require.Equal(t, "node2", n2.Name)
 	require.NotNil(t, n2.IPv4AllocCIDR)
 	require.Equal(t, "10.2.0.0/16", n2.IPv4AllocCIDR.String())
-	require.Equal(t, "", n2.Labels[annotation.ServiceNodeExposure])
-
-	objMeta := slim_metav1.ObjectMeta{
-		Name:      "foo",
-		Namespace: "bar",
-		Annotations: map[string]string{
-			annotation.ServiceNodeExposure: "beefy",
-		},
-	}
-	k8sSvc := &slim_corev1.Service{
-		ObjectMeta: objMeta,
-		Spec: slim_corev1.ServiceSpec{
-			ClusterIP: "127.0.0.1",
-			Selector: map[string]string{
-				"foo": "bar",
-			},
-			Type: slim_corev1.ServiceTypeClusterIP,
-		},
-	}
-
-	id, svc := ParseService(k8sSvc, nil)
-	require.EqualValues(t, ServiceID{Namespace: "bar", Name: "foo"}, id)
-	require.EqualValues(t, &Service{
-		ExtTrafficPolicy:         loadbalancer.SVCTrafficPolicyCluster,
-		IntTrafficPolicy:         loadbalancer.SVCTrafficPolicyCluster,
-		FrontendIPs:              []net.IP{net.ParseIP("127.0.0.1")},
-		Selector:                 map[string]string{"foo": "bar"},
-		Annotations:              map[string]string{annotation.ServiceNodeExposure: "beefy"},
-		Ports:                    map[loadbalancer.FEPortName]*loadbalancer.L4Addr{},
-		NodePorts:                map[loadbalancer.FEPortName]NodePortToFrontend{},
-		LoadBalancerSourceRanges: map[string]*cidr.CIDR{},
-		LoadBalancerAlgorithm:    loadbalancer.SVCLoadBalancingAlgorithmRandom,
-		Type:                     loadbalancer.SVCTypeClusterIP,
-		ForwardingMode:           loadbalancer.SVCForwardingModeSNAT,
-		SourceRangesPolicy:       loadbalancer.SVCSourceRangesPolicyAllow,
-		ProxyDelegation:          loadbalancer.SVCProxyDelegationNone,
-	}, svc)
+	require.Empty(t, n2.Labels[annotation.ServiceNodeExposure])
 }

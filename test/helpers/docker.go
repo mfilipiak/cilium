@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/onsi/ginkgo"
-
 	"github.com/cilium/cilium/test/helpers/constants"
 )
 
@@ -23,19 +21,6 @@ func (s *SSHMeta) ContainerExec(name string, cmd string, optionalArgs ...string)
 	return s.Exec(dockerCmd)
 }
 
-// ContainerRun is a wrapper to a one execution docker run container. It runs
-// an instance of the specific Docker image with the provided network, name and
-// options.
-func (s *SSHMeta) ContainerRun(name, image, net, options string, cmdParams ...string) *CmdRes {
-	cmdOnStart := ""
-	if len(cmdParams) > 0 {
-		cmdOnStart = strings.Join(cmdParams, " ")
-	}
-	cmd := fmt.Sprintf(
-		"docker run --name %s --net %s %s %s %s", name, net, options, image, cmdOnStart)
-	return s.ExecWithSudo(cmd)
-}
-
 // ContainerCreate is a wrapper for `docker run`. It runs an instance of the
 // specified Docker image with the provided network, name, options and container
 // startup commands.
@@ -43,9 +28,6 @@ func (s *SSHMeta) ContainerCreate(name, image, net, options string, cmdParams ..
 	cmdOnStart := ""
 	if len(cmdParams) > 0 {
 		cmdOnStart = strings.Join(cmdParams, " ")
-	}
-	if _, ok := constants.AllImages[image]; !ok {
-		ginkgo.Fail(fmt.Sprintf("Image %s is not in the set of pre-pulled Docker images; add this image to `AllImages` in `test/helpers/constants/images.go` and / or update the VM image to pull this image if necessary", image), 1)
 	}
 
 	cmd := fmt.Sprintf(
@@ -90,21 +72,13 @@ func (s *SSHMeta) containerInspectNet(name string, network string) (map[string]s
 	}
 	for _, val := range data {
 		iface := val.Interface()
-		for k, v := range iface.(map[string]interface{}) {
+		for k, v := range iface.(map[string]any) {
 			if key, ok := properties[k]; ok {
 				result[key] = fmt.Sprintf("%s", v)
 			}
 		}
 	}
 	return result, nil
-}
-
-// ContainerInspectOtherNet returns a map of Docker networking information
-// fields and their associated values for the container of the provided name,
-// on the specified docker network. An error is returned if the networking
-// information could not be retrieved.
-func (s *SSHMeta) ContainerInspectOtherNet(name string, network string) (map[string]string, error) {
-	return s.containerInspectNet(name, network)
 }
 
 // ContainerInspectNet returns a map of Docker networking information fields and
@@ -141,12 +115,6 @@ func (s *SSHMeta) NetworkCreate(name string, subnet string) *CmdRes {
 	}
 	return s.NetworkCreateWithOptions(name, subnet, true,
 		"--driver cilium --ipam-driver cilium")
-}
-
-// NetworkDelete deletes the Docker network of the provided name. It is a wrapper
-// around `docker network rm`.
-func (s *SSHMeta) NetworkDelete(name string) *CmdRes {
-	return s.ExecWithSudo(fmt.Sprintf("docker network rm  %s", name))
 }
 
 // NetworkGet returns all of the Docker network configuration for the provided

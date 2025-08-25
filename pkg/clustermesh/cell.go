@@ -4,16 +4,18 @@
 package clustermesh
 
 import (
+	"log/slog"
+
 	"github.com/cilium/hive/cell"
-	"github.com/sirupsen/logrus"
 
 	"github.com/cilium/cilium/daemon/cmd/cni"
 	"github.com/cilium/cilium/pkg/clustermesh/common"
 	"github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/clustermesh/wait"
+	"github.com/cilium/cilium/pkg/dial"
 	"github.com/cilium/cilium/pkg/ipcache"
-	"github.com/cilium/cilium/pkg/k8s"
 	"github.com/cilium/cilium/pkg/kvstore"
+	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
 	nodemanager "github.com/cilium/cilium/pkg/node/manager"
 	nodeStore "github.com/cilium/cilium/pkg/node/store"
@@ -24,10 +26,16 @@ var Cell = cell.Module(
 	"clustermesh",
 	"ClusterMesh is the Cilium multicluster implementation",
 
-	cell.Provide(NewClusterMesh),
+	cell.Provide(
+		common.DefaultRemoteClientFactory,
+		NewClusterMesh,
+	),
+
+	cell.ProvidePrivate(
+		dial.ServiceBackendResolverFactory("clustermesh"),
+	),
 
 	// Convert concrete objects into more restricted interfaces used by clustermesh.
-	cell.ProvidePrivate(func(sc k8s.ServiceCache) ServiceMerger { return sc }),
 	cell.ProvidePrivate(func(ipcache *ipcache.IPCache) ipcache.IPCacher { return ipcache }),
 	cell.ProvidePrivate(func(mgr nodemanager.NodeManager) (nodeStore.NodeManager, kvstore.ClusterSizeDependantIntervalFunc) {
 		return mgr, mgr.ClusterSizeDependantInterval
@@ -40,15 +48,19 @@ var Cell = cell.Module(
 	metrics.Metric(NewMetrics),
 	metrics.Metric(common.MetricsProvider(subsystem)),
 
+	cell.ProvidePrivate(newServiceMerger),
+	cell.Invoke(registerServicesInitialized),
+
 	cell.Config(types.DefaultQuirks),
-	cell.Invoke(func(info types.ClusterInfo, dcfg *option.DaemonConfig, cnimgr cni.CNIConfigManager, log logrus.FieldLogger, quirks types.QuirksConfig) error {
+	cell.Invoke(func(info types.ClusterInfo, dcfg *option.DaemonConfig, cnimgr cni.CNIConfigManager, log *slog.Logger, quirks types.QuirksConfig) error {
 		err := info.ValidateBuggyClusterID(dcfg.IPAM, cnimgr.GetChainingMode())
 		if err != nil && quirks.AllowUnsafePolicySKBUsage {
-			log.WithError(err).Error("Detected clustermesh ID configuration that may cause connection impact")
+			log.Error("Detected clustermesh ID configuration that may cause connection impact", logfields.Error, err)
 			return nil
 		}
 		return err
 	}),
 	cell.Invoke(ipsetNotifier),
 	cell.Invoke(nodeManagerNotifier),
+	cell.Invoke(injectSelectBackends),
 )

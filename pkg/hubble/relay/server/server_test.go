@@ -63,7 +63,6 @@ func noopParser(t testing.TB) *parser.Parser {
 		&testutils.NoopServiceGetter,
 		&testutils.NoopLinkGetter,
 		&testutils.NoopPodMetadataGetter,
-		true,
 	)
 	require.NoError(t, err)
 	return pp
@@ -73,7 +72,7 @@ var endpoints map[string]*testutils.FakeEndpointInfo
 
 func init() {
 	endpoints = make(map[string]*testutils.FakeEndpointInfo, 254)
-	for i := 0; i < 254; i++ {
+	for i := range 254 {
 		ip := fake.IP(fake.WithIPv4())
 		endpoints[ip] = &testutils.FakeEndpointInfo{
 			ID:           uint64(i),
@@ -105,8 +104,8 @@ func newHubbleObserver(t testing.TB, nodeName string, numFlows int) *observer.Lo
 
 	m := s.GetEventsChannel()
 
-	for i := 0; i < numFlows; i++ {
-		tn := monitor.TraceNotifyV0{Type: byte(monitorAPI.MessageTypeTrace)}
+	for i := range numFlows {
+		tn := monitor.TraceNotify{Type: byte(monitorAPI.MessageTypeTrace)}
 		src := getRandomEndpoint()
 		dst := getRandomEndpoint()
 		srcMAC, _ := net.ParseMAC(fake.MAC())
@@ -170,7 +169,7 @@ func newHubblePeer(t testing.TB, ctx context.Context, address string, hubbleObse
 func benchmarkRelayGetFlows(b *testing.B, withFieldMask bool) {
 	tmp := b.TempDir()
 	root := "unix://" + filepath.Join(tmp, "peer-")
-	ctx := context.Background()
+	ctx := b.Context()
 	numFlows := b.N
 	numPeers := 2
 
@@ -256,9 +255,6 @@ func benchmarkRelayGetFlows(b *testing.B, withFieldMask bool) {
 		)
 		require.NoError(b, err)
 		getFlowsReq.FieldMask = fieldmask
-		getFlowsReq.Experimental = &observerpb.GetFlowsRequest_Experimental{
-			FieldMask: fieldmask,
-		}
 	}
 	found := make([]*observerpb.Flow, 0, numFlows)
 	b.StartTimer()

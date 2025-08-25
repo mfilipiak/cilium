@@ -5,6 +5,7 @@ package operator
 
 import (
 	"context"
+	"log/slog"
 	"path"
 
 	"k8s.io/utils/ptr"
@@ -12,17 +13,18 @@ import (
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/clustermesh/common"
 	mcsapitypes "github.com/cilium/cilium/pkg/clustermesh/mcsapi/types"
+	serviceStore "github.com/cilium/cilium/pkg/clustermesh/store"
 	"github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/clustermesh/wait"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/kvstore/store"
 	"github.com/cilium/cilium/pkg/lock"
-	serviceStore "github.com/cilium/cilium/pkg/service/store"
 )
 
 // remoteCluster implements the clustermesh business logic on top of
 // common.RemoteCluster.
 type remoteCluster struct {
+	logger *slog.Logger
 	// name is the name of the cluster
 	name string
 
@@ -51,7 +53,7 @@ func (rc *remoteCluster) Run(ctx context.Context, backend kvstore.BackendOperati
 	if config.Capabilities.SyncedCanaries {
 		mgr = rc.storeFactory.NewWatchStoreManager(backend, rc.name)
 	} else {
-		mgr = store.NewWatchStoreManagerImmediate(rc.name)
+		mgr = store.NewWatchStoreManagerImmediate(rc.logger)
 	}
 
 	adapter := func(prefix string) string { return prefix }

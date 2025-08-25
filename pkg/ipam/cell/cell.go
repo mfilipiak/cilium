@@ -16,6 +16,7 @@ import (
 	"github.com/cilium/cilium/pkg/ipam"
 	ipamapi "github.com/cilium/cilium/pkg/ipam/api"
 	ipamMetadata "github.com/cilium/cilium/pkg/ipam/metadata"
+	"github.com/cilium/cilium/pkg/ipmasq"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
 	"github.com/cilium/cilium/pkg/k8s/watchers"
 	"github.com/cilium/cilium/pkg/mtu"
@@ -52,15 +53,22 @@ type ipamParams struct {
 	IPAMMetadataManager ipamMetadata.Manager
 	NodeDiscovery       *nodediscovery.NodeDiscovery
 	Sysctl              sysctl.Sysctl
+	EndpointManager     endpointmanager.EndpointManager
+	IPMasqAgent         *ipmasq.IPMasqAgent
 }
 
 func newIPAddressManager(params ipamParams) *ipam.IPAM {
-	return ipam.NewIPAM(params.Logger, params.NodeAddressing, params.AgentConfig, params.NodeDiscovery, params.LocalNodeStore, params.K8sEventReporter, params.NodeResource, params.MTU, params.Clientset, params.IPAMMetadataManager, params.Sysctl)
+	ipam := ipam.NewIPAM(params.Logger, params.NodeAddressing, params.AgentConfig, params.NodeDiscovery, params.LocalNodeStore, params.K8sEventReporter, params.NodeResource, params.MTU, params.Clientset, params.IPAMMetadataManager, params.Sysctl, params.IPMasqAgent)
+
+	params.EndpointManager.Subscribe(ipam)
+
+	return ipam
 }
 
 type ipamAPIHandlerParams struct {
 	cell.In
 
+	Logger          *slog.Logger
 	IPAM            *ipam.IPAM
 	EndpointManager endpointmanager.EndpointManager
 }
@@ -80,7 +88,8 @@ func newIPAMAPIHandler(params ipamAPIHandlerParams) ipamAPIHandlerOut {
 			EndpointManager: params.EndpointManager,
 		},
 		IpamPostIpamHandler: &ipamapi.IpamPostIpamHandler{
-			IPAM: params.IPAM,
+			Logger: params.Logger,
+			IPAM:   params.IPAM,
 		},
 		IpamPostIpamIPHandler: &ipamapi.IpamPostIpamIPHandler{
 			IPAM: params.IPAM,

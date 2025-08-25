@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 /* Copyright Authors of Cilium */
 
-#include "common.h"
-
 #include <bpf/ctx/skb.h>
+#include "common.h"
 #include "pktgen.h"
 
 /* Enable code paths under test */
@@ -14,8 +13,6 @@
 #define DSR_ENCAP_IPIP		2
 #define DSR_ENCAP_MODE		DSR_ENCAP_IPIP
 #define ENABLE_HEALTH_CHECK	1
-
-#define DISABLE_LOOPBACK_LB
 
 #define CLIENT_IP		v4_pod_one
 #define CLIENT_PORT		__bpf_htons(111)
@@ -73,8 +70,6 @@ int mock_skb_set_tunnel_key(__maybe_unused struct __sk_buff *skb,
 
 #include "bpf_host.c"
 
-ASSIGN_CONFIG(__u32, host_secctx_from_ipcache, 1)
-
 #define TO_NETDEV	0
 
 struct {
@@ -126,7 +121,7 @@ int l4lb_health_check_host_setup(struct __ctx_buff *ctx)
 		}
 	};
 
-	map_update_elem(&LB4_HEALTH_MAP, &key, &value, 0);
+	map_update_elem(&cilium_lb4_health, &key, &value, 0);
 
 	/* Jump into the entrypoint */
 	tail_call_static(ctx, entry_call_map, TO_NETDEV);

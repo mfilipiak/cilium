@@ -23,6 +23,7 @@ import (
 	"github.com/cilium/cilium/cilium-cli/defaults"
 	"github.com/cilium/cilium/cilium-cli/k8s"
 	"github.com/cilium/cilium/cilium-cli/utils/features"
+	logfilter "github.com/cilium/cilium/cilium-cli/utils/log"
 	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/k8s/client/clientset/versioned/scheme"
@@ -37,6 +38,8 @@ import (
  */
 const getPolicyRevisionRetries = 3
 
+const policyBumpAnnotation = "cli.cilium.io/bump-policy"
+
 // getCiliumPolicyRevisions returns the current policy revisions of all Cilium pods
 func (ct *ConnectivityTest) getCiliumPolicyRevisions(ctx context.Context) (map[Pod]int, error) {
 	revisions := make(map[Pod]int)
@@ -48,7 +51,7 @@ func (ct *ConnectivityTest) getCiliumPolicyRevisions(ctx context.Context) (map[P
 			if err == nil {
 				break
 			}
-			ct.Debugf("Failed to get policy revision from pod %s (%d/%d): %w", cp, i, getPolicyRevisionRetries, err)
+			ct.Debugf("Failed to get policy revision from pod %s (%d/%d): %s", cp, i, getPolicyRevisionRetries, err)
 		}
 		if err != nil {
 			return revisions, err
@@ -244,7 +247,13 @@ var policyApplyDeleteLock = lock.Mutex{}
 
 // isPolicy returns true if the object is a network policy, and thus
 // should bump the policy revision.
+//
+// This is true if the object is a known policy type (CNP / CCNP / KNP)
+// or if the object has the annotation cli.cilium.io/bump-policy
 func isPolicy(obj k8s.Object) bool {
+	if _, ok := obj.GetAnnotations()[policyBumpAnnotation]; ok {
+		return true
+	}
 	gk := obj.GetObjectKind().GroupVersionKind().GroupKind()
 	return (gk == schema.GroupKind{Group: ciliumv2.CustomResourceDefinitionGroup, Kind: ciliumv2.CNPKindDefinition} ||
 		gk == schema.GroupKind{Group: ciliumv2.CustomResourceDefinitionGroup, Kind: ciliumv2.CCNPKindDefinition} ||
@@ -378,7 +387,13 @@ func (t *Test) ContainerLogs(ctx context.Context) {
 		if err != nil {
 			t.Fatalf("Error reading Cilium logs: %s", err)
 		}
-		t.Infof("Cilium agent %s/%s logs since %s:\n%s", pod.Pod.Namespace, pod.Pod.Name, t.startTime.String(), log)
+		t.Infof(
+			"Cilium agent %s/%s logs since %s:\n%s",
+			pod.Pod.Namespace,
+			pod.Pod.Name,
+			t.startTime.String(),
+			logfilter.Reduce(log, t.verbose),
+		)
 	}
 }
 

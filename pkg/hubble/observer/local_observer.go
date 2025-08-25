@@ -144,7 +144,7 @@ nextEvent:
 				errors.Is(err, parserErrors.ErrUnknownEventType),
 				errors.Is(err, parserErrors.ErrEventSkipped),
 				// silently ignore perf ring buffer events with unknown types,
-				// since they are not intended for us (e.g. MessageTypeRecCapture)
+				// since they are not intended for us
 				parserErrors.IsErrInvalidType(err):
 			default:
 				s.log.Debug(
@@ -297,7 +297,7 @@ func (s *LocalObserverServer) GetFlows(
 				logfields.NumberOfFlows, i,
 				logfields.BufferSize, ring.Cap(),
 				logfields.Whitelist, logFilters(req.Whitelist),
-				logfields.Blacklist, logFilters(req.Whitelist),
+				logfields.Blacklist, logFilters(req.Blacklist),
 				logfields.Took, time.Since(start),
 			)
 		}()
@@ -317,10 +317,6 @@ func (s *LocalObserverServer) GetFlows(
 	}
 
 	fm := req.GetFieldMask()
-	if len(fm.GetPaths()) == 0 {
-		// TODO: Remove req.Experimental.GetFieldMask after v1.17
-		fm = req.Experimental.GetFieldMask()
-	}
 	mask, err := fieldmask.New(fm)
 	if err != nil {
 		return err

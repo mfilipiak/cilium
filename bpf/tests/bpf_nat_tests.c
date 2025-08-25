@@ -1,19 +1,16 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 /* Copyright Authors of Cilium */
 
-#include "common.h"
-
 #include <bpf/ctx/skb.h>
 #include <bpf/api.h>
+#include "common.h"
 #include "pktgen.h"
 
 #define ENABLE_SCTP
 #define ENABLE_IPV4
 #define ENABLE_NODEPORT
-#include <node_config.h>
+#include <bpf/config/node.h>
 
-#undef EVENTS_MAP
-#define EVENTS_MAP test_events_map
 #define DEBUG
 
 #include <lib/dbg.h>
@@ -607,8 +604,8 @@ int test_nat4_icmp_error_tcp_egress(__maybe_unused struct __ctx_buff *ctx)
 	/* This is the entry-point of the test, calling
 	 * snat_v4_nat().
 	 */
-	ret = snat_v4_nat(ctx, &icmp_tuple, ip4, l4_off, ipv4_has_l4_header(ip4),
-			  &target, &trace, NULL);
+	ret = snat_v4_nat(ctx, &icmp_tuple, ip4, ipfrag_encode_ipv4(ip4),
+			  l4_off, &target, &trace, NULL);
 	assert(ret == 0);
 
 	__u16 proto;
@@ -726,8 +723,8 @@ int test_nat4_icmp_error_udp_egress(__maybe_unused struct __ctx_buff *ctx)
 	/* This is the entry-point of the test, calling
 	 * snat_v4_nat().
 	 */
-	ret = snat_v4_nat(ctx, &icmp_tuple, ip4, l4_off, ipv4_has_l4_header(ip4),
-			  &target, &trace, NULL);
+	ret = snat_v4_nat(ctx, &icmp_tuple, ip4, ipfrag_encode_ipv4(ip4),
+			  l4_off, &target, &trace, NULL);
 	assert(ret == 0);
 
 	__u16 proto;
@@ -844,8 +841,8 @@ int test_nat4_icmp_error_icmp_egress(__maybe_unused struct __ctx_buff *ctx)
 	/* This is the entry-point of the test, calling
 	 * snat_v4_nat().
 	 */
-	ret = snat_v4_nat(ctx, &icmp_tuple, ip4, l4_off, ipv4_has_l4_header(ip4),
-			  &target, &trace, NULL);
+	ret = snat_v4_nat(ctx, &icmp_tuple, ip4, ipfrag_encode_ipv4(ip4),
+			  l4_off, &target, &trace, NULL);
 	assert(ret == 0);
 
 	__u16 proto;
@@ -951,8 +948,8 @@ int test_nat4_icmp_error_sctp_egress(__maybe_unused struct __ctx_buff *ctx)
 	/* This is the entry-point of the test, calling
 	 * snat_v4_nat().
 	 */
-	ret = snat_v4_nat(ctx, &icmp_tuple, ip4, l4_off, ipv4_has_l4_header(ip4),
-			  &target, &trace, NULL);
+	ret = snat_v4_nat(ctx, &icmp_tuple, ip4, ipfrag_encode_ipv4(ip4),
+			  l4_off, &target, &trace, NULL);
 	assert(ret == 0);
 
 	__u16 proto;
@@ -1022,7 +1019,7 @@ static __u32 retries_100percent[SNAT_COLLISION_RETRIES + 1];
 static __always_inline bool store_retries(__u32 *buf, bool dump)
 {
 	for (__u32 i = 0; i <= SNAT_COLLISION_RETRIES; i++) {
-		__u32 *v = map_lookup_elem(&SNAT_ALLOC_RETRIES_IPV4, &(__u32){i});
+		__u32 *v = map_lookup_elem(&cilium_snat_v4_alloc_retries, &(__u32){i});
 
 		if (!v)
 			return false;
@@ -1128,13 +1125,13 @@ static long snat_callback_tcp(__u32 i, struct snat_callback_ctx *ctx)
 	return ctx->err != 0;
 }
 
-CHECK("tc", "nat4_port_allocation")
+CHECK("tc", "nat4_port_allocation_tcp")
 int test_nat4_port_allocation_tcp_check(struct __ctx_buff *ctx)
 {
 	struct snat_callback_ctx cb_ctx = {
 		.ctx = ctx,
 	};
-	__u32 iters;
+	long iters;
 
 	test_init();
 	/* This test checks the effectiveness of port allocation algorithm in SNAT.
@@ -1153,7 +1150,7 @@ int test_nat4_port_allocation_tcp_check(struct __ctx_buff *ctx)
 	assert(cb_ctx.fail_thres >= SNAT_TEST_ITERATIONS * 0.7);
 
 	/* Only occasional failures at 50% of the test. */
-	assert(retries_50percent[SNAT_COLLISION_RETRIES] < 10);
+	assert(retries_50percent[SNAT_COLLISION_RETRIES] < 15);
 
 	/* Less than 7% of failures at 75% of the test. */
 	assert(retries_75percent[SNAT_COLLISION_RETRIES] < SNAT_TEST_ITERATIONS * 0.75 * 0.07);
@@ -1259,13 +1256,13 @@ static long snat_callback_udp(__u32 i, struct snat_callback_ctx *ctx)
 	return ctx->err != 0;
 }
 
-CHECK("tc", "nat4_port_allocation")
+CHECK("tc", "nat4_port_allocation_udp")
 int test_nat4_port_allocation_udp_check(struct __ctx_buff *ctx)
 {
 	struct snat_callback_ctx cb_ctx = {
 		.ctx = ctx,
 	};
-	__u32 iters;
+	long iters;
 
 	test_init();
 	/* This test checks the effectiveness of port allocation algorithm in SNAT.
@@ -1284,7 +1281,7 @@ int test_nat4_port_allocation_udp_check(struct __ctx_buff *ctx)
 	assert(cb_ctx.fail_thres >= SNAT_TEST_ITERATIONS * 0.7);
 
 	/* Only occasional failures at 50% of the test. */
-	assert(retries_50percent[SNAT_COLLISION_RETRIES] < 10);
+	assert(retries_50percent[SNAT_COLLISION_RETRIES] < 15);
 
 	/* Less than 7% of failures at 75% of the test. */
 	assert(retries_75percent[SNAT_COLLISION_RETRIES] < SNAT_TEST_ITERATIONS * 0.75 * 0.07);

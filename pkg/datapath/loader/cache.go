@@ -8,13 +8,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
 	"github.com/cilium/ebpf"
-	"github.com/sirupsen/logrus"
 
 	"github.com/cilium/cilium/pkg/bpf"
+	"github.com/cilium/cilium/pkg/bpf/analyze"
 	"github.com/cilium/cilium/pkg/common"
 	"github.com/cilium/cilium/pkg/datapath/loader/metrics"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
@@ -25,6 +26,8 @@ import (
 
 // objectCache amortises the cost of BPF compilation for endpoints.
 type objectCache struct {
+	logger *slog.Logger
+
 	lock.Mutex
 	datapath.ConfigWriter
 
@@ -43,10 +46,14 @@ type cachedSpec struct {
 
 	// The compiled and parsed spec. May be nil if no compilation has happened yet.
 	spec *ebpf.CollectionSpec
+
+	// The path to the compiled object file, if it exists.
+	path string
 }
 
-func newObjectCache(c datapath.ConfigWriter, workingDir string) *objectCache {
+func newObjectCache(logger *slog.Logger, c datapath.ConfigWriter, workingDir string) *objectCache {
 	return &objectCache{
+		logger:           logger,
 		ConfigWriter:     c,
 		workingDirectory: workingDir,
 		objects:          make(map[string]*cachedSpec),
@@ -81,6 +88,11 @@ func (o *objectCache) UpdateDatapathHash(nodeCfg *datapath.LocalNodeConfiguratio
 		}
 
 		return err
+	}
+	// Unlock all objects so that race detector doesn't complain about potential
+	// deadlocks.
+	for _, obj := range o.objects {
+		obj.Unlock()
 	}
 
 	o.baseHash = newHash
@@ -138,16 +150,17 @@ func (o *objectCache) build(ctx context.Context, nodeCfg *datapath.LocalNodeConf
 	}
 
 	stats.BpfCompilation.Start()
-	err = compileDatapath(ctx, dir, isHost, log)
+	err = compileDatapath(ctx, o.logger, dir, isHost)
 	stats.BpfCompilation.End(err == nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to compile template program: %w", err)
 	}
 
-	log.WithFields(logrus.Fields{
-		logfields.Path:               objectPath,
-		logfields.BPFCompilationTime: stats.BpfCompilation.Total(),
-	}).Info("Compiled new BPF template")
+	o.logger.Info(
+		"Compiled new BPF template",
+		logfields.Path, objectPath,
+		logfields.BPFCompilationTime, stats.BpfCompilation.Total(),
+	)
 
 	return objectPath, nil
 }
@@ -176,8 +189,6 @@ func (o *objectCache) fetchOrCompile(ctx context.Context, nodeCfg *datapath.Loca
 		}()
 	}
 
-	scopedLog := log.WithField(logfields.BPFHeaderfileHash, hash)
-
 	// Only allow a single concurrent compilation per hash.
 	obj := o.serialize(hash)
 	defer obj.Unlock()
@@ -193,6 +204,7 @@ func (o *objectCache) fetchOrCompile(ctx context.Context, nodeCfg *datapath.Loca
 	}
 
 	if obj.spec != nil {
+		o.logger.Debug("Using cached BPF template", logfields.Object, obj.path)
 		return obj.spec.Copy(), hash, nil
 	}
 
@@ -203,14 +215,31 @@ func (o *objectCache) fetchOrCompile(ctx context.Context, nodeCfg *datapath.Loca
 	path, err := o.build(ctx, nodeCfg, cfg, stats, dir, hash)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
-			scopedLog.WithError(err).Error("BPF template object creation failed")
+			o.logger.Error(
+				"BPF template object creation failed",
+				logfields.Error, err,
+				logfields.BPFHeaderfileHash, hash,
+			)
 		}
 		return nil, "", err
 	}
 
-	obj.spec, err = bpf.LoadCollectionSpec(path)
+	obj.path = path
+
+	obj.spec, err = bpf.LoadCollectionSpec(o.logger, path)
 	if err != nil {
 		return nil, "", fmt.Errorf("load eBPF ELF %s: %w", path, err)
+	}
+
+	// Precompute the Blocks for each ProgramSpec in the CollectionSpec so
+	// downstream callers don't need to compute them again. This is expensive to
+	// run, so do it only once per compilation. Control flow isn't expected to
+	// be changed after compilation.
+	for name, prog := range obj.spec.Programs {
+		if _, err := analyze.MakeBlocks(prog.Instructions); err != nil {
+			return nil, "", fmt.Errorf("making Blocks for ProgramSpec %s: %w", name, err)
+		}
+		o.logger.Debug("Precomputed Blocks", logfields.Object, name)
 	}
 
 	return obj.spec.Copy(), hash, nil

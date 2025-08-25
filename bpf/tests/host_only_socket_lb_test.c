@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 /* Copyright Authors of Cilium */
 
-#include "common.h"
 #include <bpf/ctx/unspec.h>
-#include <bpf/api.h>
+#include "common.h"
 #include "pktgen.h"
 
 #define TEST_BPF_SOCK 1
@@ -15,8 +14,6 @@
 #define DST_PORT 6000
 #define DST_PORT_HOSTNS 6001
 #define BACKEND_PORT 7000
-
-#define HAVE_NETNS_COOKIE 1
 
 /* Hardcode the host netns cookie to 0 */
 #define HOST_NETNS_COOKIE 0
@@ -73,21 +70,19 @@ int test1_check(__maybe_unused struct xdp_md *ctx)
 		BE_KEY_VALUE(1, v4_pod_one),
 	};
 	struct { struct lb4_key key; struct lb4_service value; } services[] = {
-		SVC_KEY_VALUE(DST_PORT, 0, 0, LB_LOOKUP_SCOPE_INT),
 		SVC_KEY_VALUE(DST_PORT, 0, 0, LB_LOOKUP_SCOPE_EXT),
 		SVC_KEY_VALUE(DST_PORT, 1, 1, LB_LOOKUP_SCOPE_EXT),
-		SVC_KEY_VALUE(DST_PORT_HOSTNS, 0, 0, LB_LOOKUP_SCOPE_INT),
 		SVC_KEY_VALUE(DST_PORT_HOSTNS, 0, 0, LB_LOOKUP_SCOPE_EXT),
 		SVC_KEY_VALUE(DST_PORT_HOSTNS, 1, 1, LB_LOOKUP_SCOPE_EXT),
 	};
 
 	/* Insert the service and backend map values */
 	for (i = 0; i < ARRAY_SIZE(services); i++)
-		map_update_elem(&LB4_SERVICES_MAP_V2, &services[i].key, &services[i].value,
+		map_update_elem(&cilium_lb4_services_v2, &services[i].key, &services[i].value,
 				BPF_ANY);
 
 	for (i = 0; i < ARRAY_SIZE(backends); i++)
-		map_update_elem(&LB4_BACKEND_MAP, &backends[i].key, &backends[i].value,
+		map_update_elem(&cilium_lb4_backends_v3, &backends[i].key, &backends[i].value,
 				BPF_ANY);
 
 	test_init();

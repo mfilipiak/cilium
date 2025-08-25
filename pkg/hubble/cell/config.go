@@ -26,9 +26,6 @@ type config struct {
 	// EventQueueSize specifies the buffer size of the channel to receive
 	// monitor events.
 	EventQueueSize int `mapstructure:"hubble-event-queue-size"`
-	// SkipUnknownCGroupIDs specifies if events with unknown cgroup ids should
-	// be skipped.
-	SkipUnknownCGroupIDs bool `mapstructure:"hubble-skip-unknown-cgroup-ids"`
 	// MonitorEvents specifies Cilium monitor events for Hubble to observe. By
 	// default, Hubble observes all monitor events.
 	MonitorEvents []string `mapstructure:"hubble-monitor-events"`
@@ -42,68 +39,6 @@ type config struct {
 	// PreferIpv6 controls whether IPv6 or IPv4 addresses should be preferred
 	// for communication to agents, if both are available.
 	PreferIpv6 bool `mapstructure:"hubble-prefer-ipv6"`
-	// DisableServerTLS allows the Hubble server to run on the given listen
-	// address without TLS.
-	DisableServerTLS bool `mapstructure:"hubble-disable-tls"`
-	// ServerTLSCertFile specifies the path to the public key file for the
-	// Hubble server. The file must contain PEM encoded data.
-	ServerTLSCertFile string `mapstructure:"hubble-tls-cert-file"`
-	// ServerTLSKeyFile specifies the path to the private key file for the
-	// Hubble server. The file must contain PEM encoded data.
-	ServerTLSKeyFile string `mapstructure:"hubble-tls-key-file"`
-	// ServerTLSClientCAFiles specifies the path to one or more client CA
-	// certificates to use for TLS with mutual authentication (mTLS). The files
-	// must contain PEM encoded data.
-	ServerTLSClientCAFiles []string `mapstructure:"hubble-tls-client-ca-files"`
-
-	// Metrics specifies enabled metrics and their configuration options.
-	Metrics string `mapstructure:"hubble-metrics"`
-	// EnableOpenMetrics enables exporting hubble metrics in OpenMetrics
-	// format.
-	EnableOpenMetrics bool `mapstructure:"enable-hubble-open-metrics"`
-
-	// MetricsServer specifies the addresses to serve Hubble metrics on.
-	MetricsServer string `mapstructure:"hubble-metrics-server"`
-	// EnableMetricsServerTLS run the Hubble metrics server on the given listen
-	// address with TLS.
-	EnableMetricsServerTLS bool `mapstructure:"hubble-metrics-server-enable-tls"`
-	// MetricsServerTLSCertFile specifies the path to the public key file for
-	// the Hubble metrics server. The file must contain PEM encoded data.
-	MetricsServerTLSCertFile string `mapstructure:"hubble-metrics-server-tls-cert-file"`
-	// MetricsServerTLSKeyFile specifies the path to the private key file for
-	// the Hubble metrics server. The file must contain PEM encoded data.
-	MetricsServerTLSKeyFile string `mapstructure:"hubble-metrics-server-tls-key-file"`
-	// MetricsServerTLSClientCAFiles specifies the path to one or more client
-	// CA certificates to use for TLS with mutual authentication (mTLS) on the
-	// Hubble metrics server. The files must contain PEM encoded data.
-	MetricsServerTLSClientCAFiles []string `mapstructure:"hubble-metrics-server-tls-client-ca-files"`
-
-	// DynamicMetricConfigFilePath specifies the filepath with configuration of hubble metrics.
-	DynamicMetricConfigFilePath string `mapstructure:"hubble-dynamic-metrics-config-path"`
-
-	// EnableRecorderAPI specifies if the Hubble Recorder API should be served.
-	EnableRecorderAPI bool `mapstructure:"enable-hubble-recorder-api"`
-	// RecorderStoragePath specifies the directory in which pcap files created
-	// via the Hubble Recorder API are stored.
-	RecorderStoragePath string `mapstructure:"hubble-recorder-storage-path"`
-	// RecorderSinkQueueSize is the queue size for each recorder sink.
-	RecorderSinkQueueSize int `mapstructure:"hubble-recorder-sink-queue-size"`
-
-	// EnableRedact controls if sensitive information will be redacted from L7
-	// flows.
-	EnableRedact bool `mapstructure:"hubble-redact-enabled"`
-	// RedactHttpURLQuery controls if the URL query will be redacted from flows.
-	RedactHttpURLQuery bool `mapstructure:"hubble-redact-http-urlquery"`
-	// RedactHttpUserInfo controls if the user info will be redacted from flows.
-	RedactHttpUserInfo bool `mapstructure:"hubble-redact-http-userinfo"`
-	// RedactHttpHeadersAllow controls which http headers will not be redacted
-	// from flows.
-	RedactHttpHeadersAllow []string `mapstructure:"hubble-redact-http-headers-allow"`
-	// RedactHttpHeadersDeny controls which http headers will be redacted from
-	// flows.
-	RedactHttpHeadersDeny []string `mapstructure:"hubble-redact-http-headers-deny"`
-	// RedactKafkaAPIKey controls if Kafka API key will be redacted from flows.
-	RedactKafkaAPIKey bool `mapstructure:"hubble-redact-kafka-apikey"`
 
 	// EnableK8sDropEvents controls whether Hubble should create v1.Events for
 	// packet drops related to pods.
@@ -118,41 +53,14 @@ type config struct {
 var defaultConfig = config{
 	EnableHubble: false,
 	// Hubble internals (parser, ringbuffer) configuration
-	EventBufferCapacity:  observeroption.Default.MaxFlows.AsInt(),
-	EventQueueSize:       0, // see getDefaultMonitorQueueSize()
-	SkipUnknownCGroupIDs: true,
-	MonitorEvents:        []string{},
+	EventBufferCapacity: observeroption.Default.MaxFlows.AsInt(),
+	EventQueueSize:      0, // see getDefaultMonitorQueueSize()
+	MonitorEvents:       []string{},
 	// Hubble local server configuration
 	SocketPath: hubbleDefaults.SocketPath,
 	// Hubble TCP server configuration
-	ListenAddress:          "",
-	PreferIpv6:             false,
-	DisableServerTLS:       false,
-	ServerTLSCertFile:      "",
-	ServerTLSKeyFile:       "",
-	ServerTLSClientCAFiles: []string{},
-	// Hubble metrics configuration
-	Metrics:           "",
-	EnableOpenMetrics: false,
-	// Hubble metrics server configuration
-	MetricsServer:                 "",
-	EnableMetricsServerTLS:        false,
-	MetricsServerTLSCertFile:      "",
-	MetricsServerTLSKeyFile:       "",
-	MetricsServerTLSClientCAFiles: []string{},
-	// Hubble metrics dynamic config CM path
-	DynamicMetricConfigFilePath: "",
-	// Hubble recorder configuration
-	EnableRecorderAPI:     true,
-	RecorderStoragePath:   hubbleDefaults.RecorderStoragePath,
-	RecorderSinkQueueSize: 1024,
-	// Hubble field redaction configuration
-	EnableRedact:           false,
-	RedactHttpURLQuery:     false,
-	RedactHttpUserInfo:     true,
-	RedactHttpHeadersAllow: []string{},
-	RedactHttpHeadersDeny:  []string{},
-	RedactKafkaAPIKey:      false,
+	ListenAddress: "",
+	PreferIpv6:    false,
 	// Hubble k8s v1.Events integration configuration.
 	EnableK8sDropEvents:   false,
 	K8sDropEventsInterval: 2 * time.Minute,
@@ -164,7 +72,6 @@ func (def config) Flags(flags *pflag.FlagSet) {
 	// Hubble internals (parser, ringbuffer) configuration
 	flags.Int("hubble-event-buffer-capacity", def.EventBufferCapacity, "Capacity of Hubble events buffer. The provided value must be one less than an integer power of two and no larger than 65535 (ie: 1, 3, ..., 2047, 4095, ..., 65535)")
 	flags.Int("hubble-event-queue-size", def.EventQueueSize, "Buffer size of the channel to receive monitor events.")
-	flags.Bool("hubble-skip-unknown-cgroup-ids", def.SkipUnknownCGroupIDs, "Skip Hubble events with unknown cgroup ids")
 	flags.StringSlice("hubble-monitor-events", def.MonitorEvents,
 		fmt.Sprintf(
 			"Cilium monitor events for Hubble to observe: [%s]. By default, Hubble observes all monitor events.",
@@ -176,31 +83,6 @@ func (def config) Flags(flags *pflag.FlagSet) {
 	// Hubble TCP server configuration
 	flags.String("hubble-listen-address", def.ListenAddress, `An additional address for Hubble server to listen to, e.g. ":4244"`)
 	flags.Bool("hubble-prefer-ipv6", def.PreferIpv6, "Prefer IPv6 addresses for announcing nodes when both address types are available.")
-	flags.Bool("hubble-disable-tls", def.DisableServerTLS, "Allow Hubble server to run on the given listen address without TLS.")
-	flags.String("hubble-tls-cert-file", def.ServerTLSCertFile, "Path to the public key file for the Hubble server. The file must contain PEM encoded data.")
-	flags.String("hubble-tls-key-file", def.ServerTLSKeyFile, "Path to the private key file for the Hubble server. The file must contain PEM encoded data.")
-	flags.StringSlice("hubble-tls-client-ca-files", def.ServerTLSClientCAFiles, "Paths to one or more public key files of client CA certificates to use for TLS with mutual authentication (mTLS). The files must contain PEM encoded data. When provided, this option effectively enables mTLS.")
-	flags.String("hubble-metrics", def.Metrics, "List of Hubble metrics to enable.")
-	flags.Bool("enable-hubble-open-metrics", def.EnableOpenMetrics, "Enable exporting hubble metrics in OpenMetrics format")
-	// Hubble metrics server configuration
-	flags.String("hubble-metrics-server", def.MetricsServer, "Address to serve Hubble metrics on.")
-	flags.Bool("hubble-metrics-server-enable-tls", def.EnableMetricsServerTLS, "Run the Hubble metrics server on the given listen address with TLS.")
-	flags.String("hubble-metrics-server-tls-cert-file", def.MetricsServerTLSCertFile, "Path to the public key file for the Hubble metrics server. The file must contain PEM encoded data.")
-	flags.String("hubble-metrics-server-tls-key-file", def.MetricsServerTLSKeyFile, "Path to the private key file for the Hubble metrics server. The file must contain PEM encoded data.")
-	flags.StringSlice("hubble-metrics-server-tls-client-ca-files", def.MetricsServerTLSClientCAFiles, "Paths to one or more public key files of client CA certificates to use for TLS with mutual authentication (mTLS). The files must contain PEM encoded data. When provided, this option effectively enables mTLS.")
-	// Hubble metrics dynamic config CM path
-	flags.String("hubble-dynamic-metrics-config-path", def.DynamicMetricConfigFilePath, "Filepath with dynamic configuration of hubble metrics")
-	// Hubble recorder configuration
-	flags.Bool("enable-hubble-recorder-api", def.EnableRecorderAPI, "Enable the Hubble recorder API")
-	flags.String("hubble-recorder-storage-path", def.RecorderStoragePath, "Directory in which pcap files created via the Hubble Recorder API are stored")
-	flags.Int("hubble-recorder-sink-queue-size", def.RecorderSinkQueueSize, "Queue size of each Hubble recorder sink")
-	// Hubble field redaction configuration
-	flags.Bool("hubble-redact-enabled", def.EnableRedact, "Hubble redact sensitive information from flows")
-	flags.Bool("hubble-redact-http-urlquery", def.RedactHttpURLQuery, "Hubble redact http URL query from flows")
-	flags.Bool("hubble-redact-http-userinfo", def.RedactHttpUserInfo, "Hubble redact http user info from flows")
-	flags.StringSlice("hubble-redact-http-headers-allow", def.RedactHttpHeadersAllow, "HTTP headers to keep visible in flows")
-	flags.StringSlice("hubble-redact-http-headers-deny", def.RedactHttpHeadersDeny, "HTTP headers to redact from flows")
-	flags.Bool("hubble-redact-kafka-apikey", def.RedactKafkaAPIKey, "Hubble redact Kafka API key from flows")
 	// Hubble k8s v1.Events integration configuration.
 	flags.Bool("hubble-drop-events", def.EnableK8sDropEvents, "Emit packet drop Events related to pods (alpha)")
 	flags.Duration("hubble-drop-events-interval", def.K8sDropEventsInterval, "Minimum time between emitting same events")
@@ -231,17 +113,7 @@ func (cfg *config) normalize() {
 	}
 }
 
-func (cfg config) validate() error {
-	if len(cfg.RedactHttpHeadersAllow) > 0 && len(cfg.RedactHttpHeadersDeny) > 0 {
-		return fmt.Errorf("Only one of --hubble-redact-http-headers-allow and --hubble-redact-http-headers-deny can be specified, not both")
-	}
-	return nil
-}
-
 func getDefaultMonitorQueueSize(numCPU int) int {
-	monitorQueueSize := numCPU * ciliumDefaults.MonitorQueueSizePerCPU
-	if monitorQueueSize > ciliumDefaults.MonitorQueueSizePerCPUMaximum {
-		monitorQueueSize = ciliumDefaults.MonitorQueueSizePerCPUMaximum
-	}
+	monitorQueueSize := min(numCPU*ciliumDefaults.MonitorQueueSizePerCPU, ciliumDefaults.MonitorQueueSizePerCPUMaximum)
 	return monitorQueueSize
 }

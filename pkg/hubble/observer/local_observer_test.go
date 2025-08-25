@@ -48,7 +48,6 @@ func noopParser(t *testing.T) *parser.Parser {
 		&testutils.NoopServiceGetter,
 		&testutils.NoopLinkGetter,
 		&testutils.NoopPodMetadataGetter,
-		true,
 	)
 	require.NoError(t, err)
 	return pp
@@ -69,7 +68,7 @@ func TestLocalObserverServer_ServerStatus(t *testing.T) {
 	pp := noopParser(t)
 	s, err := NewLocalServer(pp, nsManager, hivetest.Logger(t), observeroption.WithMaxFlows(container.Capacity1))
 	require.NoError(t, err)
-	res, err := s.ServerStatus(context.Background(), &observerpb.ServerStatusRequest{})
+	res, err := s.ServerStatus(t.Context(), &observerpb.ServerStatusRequest{})
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), res.SeenFlows)
 	assert.Equal(t, uint64(0), res.NumFlows)
@@ -80,7 +79,7 @@ func TestLocalObserverServer_ServerStatus(t *testing.T) {
 func TestGetFlowRate(t *testing.T) {
 	type event struct {
 		offset int
-		event  interface{}
+		event  any
 	}
 
 	tcs := map[string]struct {
@@ -213,7 +212,7 @@ func TestLocalObserverServer_GetFlows(t *testing.T) {
 		},
 		FakeGRPCServerStream: &testutils.FakeGRPCServerStream{
 			OnContext: func() context.Context {
-				return context.Background()
+				return t.Context()
 			},
 		},
 	}
@@ -229,8 +228,8 @@ func TestLocalObserverServer_GetFlows(t *testing.T) {
 	m := s.GetEventsChannel()
 	input := make([]*observerpb.Flow, numFlows)
 
-	for i := 0; i < numFlows; i++ {
-		tn := monitor.TraceNotifyV0{Type: byte(monitorAPI.MessageTypeTrace)}
+	for i := range numFlows {
+		tn := monitor.TraceNotify{Type: byte(monitorAPI.MessageTypeTrace)}
 		macOnly := func(mac string) net.HardwareAddr {
 			m, _ := net.ParseMAC(mac)
 			return m
@@ -292,9 +291,6 @@ func TestLocalObserverServer_GetFlows(t *testing.T) {
 	req = &observerpb.GetFlowsRequest{
 		Number:    uint64(10),
 		FieldMask: &fieldmaskpb.FieldMask{Paths: fmPaths},
-		Experimental: &observerpb.GetFlowsRequest_Experimental{
-			FieldMask: &fieldmaskpb.FieldMask{Paths: fmPaths},
-		},
 	}
 	err = s.GetFlows(req, fakeServer)
 	assert.NoError(t, err)
@@ -317,9 +313,6 @@ func TestLocalObserverServer_GetFlows(t *testing.T) {
 	req = &observerpb.GetFlowsRequest{
 		Number:    uint64(10),
 		FieldMask: &fieldmaskpb.FieldMask{Paths: []string{""}},
-		Experimental: &observerpb.GetFlowsRequest_Experimental{
-			FieldMask: &fieldmaskpb.FieldMask{Paths: []string{""}},
-		},
 	}
 	err = s.GetFlows(req, fakeServer)
 	assert.EqualError(t, err, "invalid fieldmask")
@@ -351,14 +344,14 @@ func TestLocalObserverServer_GetAgentEvents(t *testing.T) {
 				serviceDelete := response.GetAgentEvent().GetServiceDelete()
 				assert.NotNil(t, serviceDelete)
 			default:
-				assert.Fail(t, "unexpected agent event", ev)
+				assert.Fail(t, "unexpected agent event", "event: %v", ev)
 			}
 			agentEventsReceived++
 			return nil
 		},
 		FakeGRPCServerStream: &testutils.FakeGRPCServerStream{
 			OnContext: func() context.Context {
-				return context.Background()
+				return t.Context()
 			},
 		},
 	}
@@ -371,16 +364,14 @@ func TestLocalObserverServer_GetAgentEvents(t *testing.T) {
 	go s.Start()
 
 	m := s.GetEventsChannel()
-	for i := 0; i < numEvents; i++ {
+	for i := range numEvents {
 		ts := time.Unix(int64(i), 0)
 		node := fmt.Sprintf("node #%03d", i)
 		var msg monitorAPI.AgentNotifyMessage
 		if i == 0 {
 			msg = monitorAPI.StartMessage(time.Unix(42, 1))
-		} else if i%2 == 1 {
-			msg = monitorAPI.IPCacheUpsertedMessage(cidr, uint32(i), nil, net.ParseIP("10.1.5.4"), nil, 0xff, "default", "foobar")
 		} else {
-			msg = monitorAPI.ServiceDeleteMessage(uint32(i))
+			msg = monitorAPI.IPCacheUpsertedMessage(cidr, uint32(i), nil, net.ParseIP("10.1.5.4"), nil, 0xff, "default", "foobar")
 		}
 		m <- &observerTypes.MonitorEvent{
 			Timestamp: ts,
@@ -424,7 +415,7 @@ func TestLocalObserverServer_GetFlows_Follow_Since(t *testing.T) {
 
 	generateFlows := func(from, to int, m chan<- *observerTypes.MonitorEvent) {
 		for i := from; i < to; i++ {
-			tn := monitor.TraceNotifyV0{Type: byte(monitorAPI.MessageTypeTrace)}
+			tn := monitor.TraceNotify{Type: byte(monitorAPI.MessageTypeTrace)}
 			data := testutils.MustCreateL3L4Payload(tn)
 			m <- &observerTypes.MonitorEvent{
 				Timestamp: time.Unix(int64(i), 0),
@@ -474,7 +465,7 @@ func TestLocalObserverServer_GetFlows_Follow_Since(t *testing.T) {
 		},
 		FakeGRPCServerStream: &testutils.FakeGRPCServerStream{
 			OnContext: func() context.Context {
-				return context.Background()
+				return t.Context()
 			},
 		},
 	}
@@ -524,8 +515,8 @@ func TestHooks(t *testing.T) {
 	go s.Start()
 
 	m := s.GetEventsChannel()
-	for i := 0; i < numFlows; i++ {
-		tn := monitor.TraceNotifyV0{Type: byte(monitorAPI.MessageTypeTrace)}
+	for i := range numFlows {
+		tn := monitor.TraceNotify{Type: byte(monitorAPI.MessageTypeTrace)}
 		data := testutils.MustCreateL3L4Payload(tn)
 		m <- &observerTypes.MonitorEvent{
 			Timestamp: time.Unix(int64(i), 0),
@@ -555,7 +546,7 @@ func TestLocalObserverServer_OnFlowDelivery(t *testing.T) {
 		},
 		FakeGRPCServerStream: &testutils.FakeGRPCServerStream{
 			OnContext: func() context.Context {
-				return context.Background()
+				return t.Context()
 			},
 		},
 	}
@@ -579,8 +570,8 @@ func TestLocalObserverServer_OnFlowDelivery(t *testing.T) {
 	go s.Start()
 
 	m := s.GetEventsChannel()
-	for i := 0; i < numFlows; i++ {
-		tn := monitor.TraceNotifyV0{Type: byte(monitorAPI.MessageTypeTrace)}
+	for i := range numFlows {
+		tn := monitor.TraceNotify{Type: byte(monitorAPI.MessageTypeTrace)}
 		data := testutils.MustCreateL3L4Payload(tn)
 		m <- &observerTypes.MonitorEvent{
 			Timestamp: time.Unix(int64(i), 0),
@@ -613,7 +604,7 @@ func TestLocalObserverServer_OnGetFlows(t *testing.T) {
 		},
 		FakeGRPCServerStream: &testutils.FakeGRPCServerStream{
 			OnContext: func() context.Context {
-				return context.Background()
+				return t.Context()
 			},
 		},
 	}
@@ -643,8 +634,8 @@ func TestLocalObserverServer_OnGetFlows(t *testing.T) {
 	go s.Start()
 
 	m := s.GetEventsChannel()
-	for i := 0; i < numFlows; i++ {
-		tn := monitor.TraceNotifyV0{Type: byte(monitorAPI.MessageTypeTrace)}
+	for i := range numFlows {
+		tn := monitor.TraceNotify{Type: byte(monitorAPI.MessageTypeTrace)}
 		data := testutils.MustCreateL3L4Payload(tn)
 		m <- &observerTypes.MonitorEvent{
 			Timestamp: time.Unix(int64(i), 0),
@@ -668,8 +659,7 @@ func TestLocalObserverServer_OnGetFlows(t *testing.T) {
 // TestLocalObserverServer_NodeLabels test the LocalNodeWatcher integration
 // with the observer.
 func TestLocalObserverServer_NodeLabels(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	// local node stuff setup.
 	localNode := node.LocalNode{
@@ -719,7 +709,7 @@ func TestLocalObserverServer_NodeLabels(t *testing.T) {
 
 	// simulate a new monitor event.
 	m := s.GetEventsChannel()
-	tn := monitor.TraceNotifyV0{Type: byte(monitorAPI.MessageTypeTrace)}
+	tn := monitor.TraceNotify{Type: byte(monitorAPI.MessageTypeTrace)}
 	data := testutils.MustCreateL3L4Payload(tn)
 	// NOTE: we need to send an extra event into Hubble's ring buffer to see
 	// the first one sent.
@@ -758,7 +748,7 @@ func TestLocalObserverServer_GetNamespaces(t *testing.T) {
 	})
 	s, err := NewLocalServer(pp, nsManager, hivetest.Logger(t), observeroption.WithMaxFlows(container.Capacity1))
 	require.NoError(t, err)
-	res, err := s.GetNamespaces(context.Background(), &observerpb.GetNamespacesRequest{})
+	res, err := s.GetNamespaces(t.Context(), &observerpb.GetNamespacesRequest{})
 	require.NoError(t, err)
 	expected := &observerpb.GetNamespacesResponse{
 		Namespaces: []*observerpb.Namespace{
@@ -788,7 +778,6 @@ func Benchmark_TrackNamespaces(b *testing.B) {
 		&testutils.NoopServiceGetter,
 		&testutils.NoopLinkGetter,
 		&testutils.NoopPodMetadataGetter,
-		true,
 	)
 	if err != nil {
 		b.Fatal(err)
@@ -805,8 +794,8 @@ func Benchmark_TrackNamespaces(b *testing.B) {
 	}
 
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		s.trackNamespaces(f)
 	}
 }

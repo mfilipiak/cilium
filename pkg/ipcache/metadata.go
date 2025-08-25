@@ -8,20 +8,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"maps"
 	"net"
 	"net/netip"
 	"sync"
 
-	"github.com/sirupsen/logrus"
-
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/container/bitlpm"
 	"github.com/cilium/cilium/pkg/controller"
+	"github.com/cilium/cilium/pkg/counter"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/ipcache/types"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
-	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/source"
 	"github.com/cilium/cilium/pkg/time"
@@ -36,6 +37,9 @@ var (
 
 	injectLabelsControllerGroup = controller.NewGroup("ipcache-inject-labels")
 )
+
+// clusterID is the type of the key to use in the metadata CIDRTrieMap
+type clusterID uint32
 
 // metadata contains the ipcache metadata. Mainily it holds a map which maps IP
 // prefixes (x.x.x.x/32) to a set of information (prefixInfo).
@@ -65,18 +69,25 @@ var (
 //
 // ```
 type metadata struct {
+	logger *slog.Logger
 	// Protects the m map.
 	//
 	// If this mutex will be held at the same time as the IPCache mutex,
 	// this mutex must be taken first and then take the IPCache mutex in
 	// order to prevent deadlocks.
-	lock.RWMutex
+	lock.Mutex
 
 	// m is the actual map containing the mappings.
-	m map[netip.Prefix]prefixInfo
+	m map[cmtypes.PrefixCluster]*prefixInfo
 
-	// prefixes is a trie of prefixes, for finding descendants efficiently
-	prefixes *bitlpm.CIDRTrie[struct{}]
+	// prefixes is a map of tries. Each trie holds the prefixes for the same
+	// clusterID, in order to find descendants efficiently.
+	prefixes *bitlpm.CIDRTrieMap[clusterID, struct{}]
+
+	// prefixRefCounter keeps a reference count of all prefixes that come from
+	// policy resources, as an optimization, in order to avoid redundantly
+	// storing all prefixes from policies.
+	prefixRefCounter counter.Counter[cmtypes.PrefixCluster]
 
 	// queued* handle updates into the IPCache. Whenever a label is added
 	// or removed from a specific IP prefix, that prefix is added into
@@ -84,7 +95,7 @@ type metadata struct {
 	// process the metadata changes for these prefixes and potentially
 	// generate updates into the ipcache, policy engine and datapath.
 	queuedChangesMU lock.Mutex
-	queuedPrefixes  map[netip.Prefix]struct{}
+	queuedPrefixes  map[cmtypes.PrefixCluster]struct{}
 
 	// queuedRevision is the "version" of the prefix queue. It is incremented
 	// on every *dequeue*. If injection is successful, then injectedRevision
@@ -109,12 +120,14 @@ type metadata struct {
 	reservedHostLabels map[netip.Prefix]labels.Labels
 }
 
-func newMetadata() *metadata {
+func newMetadata(logger *slog.Logger) *metadata {
 	return &metadata{
-		m:              make(map[netip.Prefix]prefixInfo),
-		prefixes:       bitlpm.NewCIDRTrie[struct{}](),
-		queuedPrefixes: make(map[netip.Prefix]struct{}),
-		queuedRevision: 1,
+		logger:           logger,
+		m:                make(map[cmtypes.PrefixCluster]*prefixInfo),
+		prefixes:         bitlpm.NewCIDRTrieMap[clusterID, struct{}](),
+		prefixRefCounter: make(counter.Counter[cmtypes.PrefixCluster]),
+		queuedPrefixes:   make(map[cmtypes.PrefixCluster]struct{}),
+		queuedRevision:   1,
 
 		injectedRevisionCond: sync.NewCond(&lock.Mutex{}),
 
@@ -125,13 +138,13 @@ func newMetadata() *metadata {
 // dequeuePrefixUpdates returns the set of queued prefixes, as well as the revision
 // that should be passed to setInjectedRevision once label injection has successfully
 // completed.
-func (m *metadata) dequeuePrefixUpdates() (modifiedPrefixes []netip.Prefix, revision uint64) {
+func (m *metadata) dequeuePrefixUpdates() (modifiedPrefixes []cmtypes.PrefixCluster, revision uint64) {
 	m.queuedChangesMU.Lock()
-	modifiedPrefixes = make([]netip.Prefix, 0, len(m.queuedPrefixes))
+	modifiedPrefixes = make([]cmtypes.PrefixCluster, 0, len(m.queuedPrefixes))
 	for p := range m.queuedPrefixes {
 		modifiedPrefixes = append(modifiedPrefixes, p)
 	}
-	m.queuedPrefixes = make(map[netip.Prefix]struct{})
+	m.queuedPrefixes = make(map[cmtypes.PrefixCluster]struct{})
 	revision = m.queuedRevision
 	m.queuedRevision++ // Increment, as any newly-queued prefixes are now subject to the next revision cycle
 	m.queuedChangesMU.Unlock()
@@ -141,7 +154,7 @@ func (m *metadata) dequeuePrefixUpdates() (modifiedPrefixes []netip.Prefix, revi
 
 // enqueuePrefixUpdates queues prefixes for label injection. It returns the "next"
 // queue revision number, which can be passed to waitForRevision.
-func (m *metadata) enqueuePrefixUpdates(prefixes ...netip.Prefix) uint64 {
+func (m *metadata) enqueuePrefixUpdates(prefixes ...cmtypes.PrefixCluster) uint64 {
 	m.queuedChangesMU.Lock()
 	defer m.queuedChangesMU.Unlock()
 
@@ -188,65 +201,90 @@ func (m *metadata) waitForRevision(ctx context.Context, rev uint64) error {
 	return nil
 }
 
-// canonicalPrefix returns the canonical version of the prefix which must be
-// used for lookups in the metadata prefix map. The canonical representation of
-// a prefix has the lower bits of the address always zeroed out and does
-// not contain any IPv4-mapped IPv6 address
-func canonicalPrefix(prefix netip.Prefix) netip.Prefix {
-	if !prefix.IsValid() {
-		return prefix // no canonical version of invalid prefix
+// canonicalPrefix returns the prefixCluster with its prefix in canonicalized form.
+// The canonical version of the prefix must be used for lookups in the metadata prefixCluster
+// map. The canonical representation of a prefix has the lower bits of the address always
+// zeroed out and does not contain any IPv4-mapped IPv6 address.
+func canonicalPrefix(prefixCluster cmtypes.PrefixCluster) cmtypes.PrefixCluster {
+	if !prefixCluster.AsPrefix().IsValid() {
+		return prefixCluster // no canonical version of invalid prefix
 	}
+
+	prefix := prefixCluster.AsPrefix()
+	clusterID := prefixCluster.ClusterID()
 
 	// Prefix() always zeroes out the lower bits
 	p, err := prefix.Addr().Unmap().Prefix(prefix.Bits())
 	if err != nil {
-		return prefix // no canonical version of invalid prefix
+		return prefixCluster // no canonical version of invalid prefix
 	}
 
-	return p
+	return cmtypes.NewPrefixCluster(p, clusterID)
 }
 
-func (m *metadata) upsertLocked(prefix netip.Prefix, src source.Source, resource types.ResourceID, info ...IPMetadata) []netip.Prefix {
+// upsertLocked inserts / updates the set of metadata associated with this resource for this prefix.
+// It returns the set of affected prefixes. It may return nil if the metadata change is a no-op.
+func (m *metadata) upsertLocked(prefix cmtypes.PrefixCluster, src source.Source, resource types.ResourceID, info ...IPMetadata) []cmtypes.PrefixCluster {
 	prefix = canonicalPrefix(prefix)
 	changed := false
+
 	if _, ok := m.m[prefix]; !ok {
 		changed = true
-		m.m[prefix] = make(prefixInfo)
-		m.prefixes.Upsert(prefix, struct{}{})
+		m.m[prefix] = newPrefixInfo()
+		m.prefixes.Upsert(clusterID(prefix.ClusterID()), prefix.AsPrefix(), struct{}{})
 	}
-	if _, ok := m.m[prefix][resource]; !ok {
+	if _, ok := m.m[prefix].byResource[resource]; !ok {
 		changed = true
-		m.m[prefix][resource] = &resourceInfo{
+		m.m[prefix].byResource[resource] = &resourceInfo{
 			source: src,
 		}
 	}
 
 	for _, i := range info {
-		c := m.m[prefix][resource].merge(i, src)
+		c := m.m[prefix].byResource[resource].merge(m.logger, i, src)
 		changed = changed || c
 	}
 
-	if m.m[prefix][resource].shouldLogConflicts() {
-		m.m[prefix].logConflicts(log.WithField(logfields.CIDR, prefix))
-	}
-
-	if !changed {
+	// If the metadata for this resource hasn't changed, *or* it has
+	// no effect on the flattened metadata, then return zero affected prefixes.
+	if !changed || m.m[prefix].flattened.has(src, info) {
 		return nil
 	}
+
+	// Invalidated flattened metadata. Will be re-populated on next read.
+	m.m[prefix].flattened = nil
 
 	return m.findAffectedChildPrefixes(prefix)
 }
 
 // GetMetadataSourceByPrefix returns the highest precedence source which has
 // provided metadata for this prefix
-func (ipc *IPCache) GetMetadataSourceByPrefix(prefix netip.Prefix) source.Source {
-	ipc.metadata.RLock()
-	defer ipc.metadata.RUnlock()
+func (ipc *IPCache) GetMetadataSourceByPrefix(prefix cmtypes.PrefixCluster) source.Source {
+	ipc.metadata.Lock()
+	defer ipc.metadata.Unlock()
 	return ipc.metadata.getLocked(prefix).Source()
 }
 
-func (m *metadata) getLocked(prefix netip.Prefix) prefixInfo {
-	return m.m[canonicalPrefix(prefix)]
+// get returns a deep copy of the flattened prefix info
+func (m *metadata) get(prefix cmtypes.PrefixCluster) *resourceInfo {
+	m.Lock()
+	defer m.Unlock()
+	return m.getLocked(prefix)
+}
+
+// getLocked returns a deep copy of the flattened prefix info
+func (m *metadata) getLocked(prefix cmtypes.PrefixCluster) *resourceInfo {
+	if pi, ok := m.m[canonicalPrefix(prefix)]; ok {
+		if pi.flattened == nil {
+			// re-compute the flattened set of prefixes
+			pi.flattened = pi.flatten(m.logger.With(
+				logfields.CIDR, prefix,
+				logfields.ClusterID, prefix.ClusterID(),
+			))
+		}
+		return pi.flattened.DeepCopy()
+	}
+	return nil
 }
 
 // mergeParentLabels pulls down all labels from parent prefixes, with "longer" prefixes having
@@ -257,14 +295,17 @@ func (m *metadata) getLocked(prefix netip.Prefix) prefixInfo {
 // - 10.1.0.0/16 -> "a=c"
 // - 10.1.1.0/24 -> "d=e"
 // the complete set of labels for 10.1.1.0/24 is [a=c, d=e, foo=bar]
-func (m *metadata) mergeParentLabels(lbls labels.Labels, prefix netip.Prefix) {
+func (m *metadata) mergeParentLabels(lbls labels.Labels, prefixCluster cmtypes.PrefixCluster) {
+	m.Lock()
+	defer m.Unlock()
 	hasCIDR := lbls.HasSource(labels.LabelSourceCIDR) // we should only merge one CIDR label
 
 	// Iterate over all shorter prefixes, from `prefix` to 0.0.0.0/0 // ::/0.
 	// Merge all labels, preferring those from longer prefixes, but only merge a single "cidr:XXX" label at most.
+	prefix := prefixCluster.AsPrefix()
 	for bits := prefix.Bits() - 1; bits >= 0; bits-- {
 		parent, _ := prefix.Addr().Unmap().Prefix(bits) // canonical
-		if info, ok := m.m[parent]; ok {
+		if info := m.getLocked(cmtypes.NewPrefixCluster(parent, prefixCluster.ClusterID())); info != nil {
 			for k, v := range info.ToLabels() {
 				if v.Source == labels.LabelSourceCIDR && hasCIDR {
 					continue
@@ -282,13 +323,13 @@ func (m *metadata) mergeParentLabels(lbls labels.Labels, prefix netip.Prefix) {
 
 // findAffectedChildPrefixes returns the list of all child prefixes which are
 // affected by an update to the parent prefix
-func (m *metadata) findAffectedChildPrefixes(parent netip.Prefix) (children []netip.Prefix) {
+func (m *metadata) findAffectedChildPrefixes(parent cmtypes.PrefixCluster) (children []cmtypes.PrefixCluster) {
 	if parent.IsSingleIP() {
-		return []netip.Prefix{parent} // no children
+		return []cmtypes.PrefixCluster{parent} // no children
 	}
 
-	m.prefixes.Descendants(parent, func(child netip.Prefix, _ struct{}) bool {
-		children = append(children, child)
+	m.prefixes.Descendants(clusterID(parent.ClusterID()), parent.AsPrefix(), func(child netip.Prefix, _ struct{}) bool {
+		children = append(children, cmtypes.NewPrefixCluster(child, parent.ClusterID()))
 		return true
 	})
 
@@ -312,17 +353,14 @@ func (m *metadata) findAffectedChildPrefixes(parent netip.Prefix) (children []ne
 // unexpected error while processing the identity updates for those CIDRs
 // The caller should attempt to retry injecting labels for those CIDRs.
 //
-// 'mutated' is returned as 'true' if an identity's labels were changed. In this case
-// the caller must trigger forced policy regenerations on all endpoints.
-//
 // Do not call this directly; rather, use TriggerLabelInjection()
-func (ipc *IPCache) doInjectLabels(ctx context.Context, modifiedPrefixes []netip.Prefix) (remainingPrefixes []netip.Prefix, mutated bool, err error) {
+func (ipc *IPCache) doInjectLabels(ctx context.Context, modifiedPrefixes []cmtypes.PrefixCluster) (remainingPrefixes []cmtypes.PrefixCluster, err error) {
 	if ipc.IdentityAllocator == nil {
-		return modifiedPrefixes, false, ErrLocalIdentityAllocatorUninitialized
+		return modifiedPrefixes, ErrLocalIdentityAllocatorUninitialized
 	}
 
 	if !ipc.Configuration.CacheStatus.Synchronized() {
-		return modifiedPrefixes, false, errors.New("k8s cache not fully synced")
+		return modifiedPrefixes, errors.New("k8s cache not fully synced")
 	}
 
 	type ipcacheEntry struct {
@@ -337,27 +375,24 @@ func (ipc *IPCache) doInjectLabels(ctx context.Context, modifiedPrefixes []netip
 	var (
 		// previouslyAllocatedIdentities maps IP Prefix -> Identity for
 		// old identities where the prefix will now map to a new identity
-		previouslyAllocatedIdentities = make(map[netip.Prefix]Identity)
+		previouslyAllocatedIdentities = make(map[cmtypes.PrefixCluster]Identity)
 		// idsToAdd stores the identities that must be updated via the
 		// selector cache.
-		idsToAdd    = make(map[identity.NumericIdentity]labels.LabelArray)
-		idsToDelete = make(map[identity.NumericIdentity]labels.LabelArray)
+		idsToAdd = make(map[identity.NumericIdentity]labels.LabelArray)
 		// entriesToReplace stores the identity to replace in the ipcache.
-		entriesToReplace = make(map[netip.Prefix]ipcacheEntry)
-		entriesToDelete  = make(map[netip.Prefix]Identity)
+		entriesToReplace = make(map[cmtypes.PrefixCluster]ipcacheEntry)
+		entriesToDelete  = make(map[cmtypes.PrefixCluster]Identity)
 		// unmanagedPrefixes is the set of prefixes for which we no longer have
 		// any metadata, but were created by a call directly to Upsert()
-		unmanagedPrefixes = make(map[netip.Prefix]Identity)
+		unmanagedPrefixes = make(map[cmtypes.PrefixCluster]Identity)
 	)
-
-	ipc.metadata.RLock()
 
 	for i, prefix := range modifiedPrefixes {
 		pstr := prefix.String()
 		oldID, entryExists := ipc.LookupByIP(pstr)
 		oldTunnelIP, oldEncryptionKey := ipc.getHostIPCache(pstr)
 		oldEndpointFlags := ipc.getEndpointFlags(pstr)
-		prefixInfo := ipc.metadata.getLocked(prefix)
+		prefixInfo := ipc.metadata.get(prefix)
 		var newID *identity.Identity
 		var isNew bool
 		if prefixInfo == nil {
@@ -367,7 +402,7 @@ func (ipc *IPCache) doInjectLabels(ctx context.Context, modifiedPrefixes []netip
 			} // else continue below to remove the old entry
 		} else {
 			// Insert to propagate the updated set of labels after removal.
-			newID, isNew, err = ipc.resolveIdentity(ctx, prefix, prefixInfo, prefixInfo.RequestedIdentity().ID())
+			newID, isNew, err = ipc.resolveIdentity(prefix, prefixInfo)
 			if err != nil {
 				// NOTE: This may fail during a 2nd or later
 				// iteration of the loop. To handle this, break
@@ -463,11 +498,11 @@ func (ipc *IPCache) doInjectLabels(ctx context.Context, modifiedPrefixes []netip
 				// ensure that if the other owner ever releases
 				// their reference, this reference stays live.
 				if option.Config.Debug {
-					log.WithFields(logrus.Fields{
-						logfields.Prefix:      prefix,
-						logfields.OldIdentity: oldID.ID,
-						logfields.Identity:    entry.identity.ID,
-					}).Debug("Acquiring Identity reference")
+					ipc.logger.Debug(
+						"Acquiring Identity reference",
+						logfields.IdentityOld, oldID.ID,
+						logfields.Identity, entry.identity.ID,
+					)
 				}
 			} else {
 				previouslyAllocatedIdentities[prefix] = oldID
@@ -504,10 +539,10 @@ func (ipc *IPCache) doInjectLabels(ctx context.Context, modifiedPrefixes []netip
 					unmanagedPrefixes[prefix] = unmanagedEntry.identity
 
 					if option.Config.Debug {
-						log.WithFields(logrus.Fields{
-							logfields.Prefix:      prefix,
-							logfields.OldIdentity: oldID.ID,
-						}).Debug("Previously managed IPCache entry is now unmanaged")
+						ipc.logger.Debug(
+							"Previously managed IPCache entry is now unmanaged",
+							logfields.IdentityOld, oldID.ID,
+						)
 					}
 				} else if oldID.exclusivelyOwnedByLegacyAPI() {
 					// Even if we never actually overwrote the legacy-owned
@@ -529,20 +564,24 @@ func (ipc *IPCache) doInjectLabels(ctx context.Context, modifiedPrefixes []netip
 		// it is being deleted or changing IDs), we need to recompute the labels
 		// for reserved:host and push that to the SelectorCache
 		if entryExists && oldID.ID == identity.ReservedIdentityHost &&
-			(newID == nil || newID.ID != identity.ReservedIdentityHost) {
-			i := ipc.updateReservedHostLabels(prefix, nil)
+			(newID == nil || newID.ID != identity.ReservedIdentityHost) && prefix.ClusterID() == 0 {
+			i := ipc.updateReservedHostLabels(prefix.AsPrefix(), nil)
 			idsToAdd[i.ID] = i.Labels.LabelArray()
 		}
 
 	}
-	// Don't hold lock while calling UpdateIdentities, as it will otherwise run into a deadlock
-	ipc.metadata.RUnlock()
 
-	// Recalculate policy first before upserting into the ipcache.
-	if len(idsToAdd) > 0 {
-		if ipc.UpdatePolicyMaps(ctx, idsToAdd, nil) {
-			mutated = true
-		}
+	// Batch update the SelectorCache and policymaps with the newly allocated identities.
+	// This must be done before writing them to the ipcache, or else traffic may be dropped.
+	// (This is because prefixes may have identities that are not yet marked as allowed.)
+	//
+	// We must do this even if we don't appear to have allocated any identities, because they
+	// may be in flight due to another caller.
+	done := ipc.IdentityUpdater.UpdateIdentities(idsToAdd, nil)
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return modifiedPrefixes, ctx.Err()
 	}
 
 	ipc.mutex.Lock()
@@ -572,91 +611,57 @@ func (ipc *IPCache) doInjectLabels(ctx context.Context, modifiedPrefixes []netip
 				ExistingSrc: oldID.Source,
 				NewSrc:      entry.identity.Source,
 			})) {
-				log.WithError(err2).WithFields(logrus.Fields{
-					logfields.IPAddr:   prefix,
-					logfields.Identity: entry.identity.ID,
-				}).Error("Failed to replace ipcache entry with new identity after label removal. Traffic may be disrupted.")
+				ipc.logger.Error(
+					"Failed to replace ipcache entry with new identity after label removal. Traffic may be disrupted.",
+					logfields.Error, err2,
+					logfields.IPAddr, prefix,
+					logfields.Identity, entry.identity.ID,
+				)
 			}
 		}
 	}
 
-	for prefix, id := range previouslyAllocatedIdentities {
-		realID := ipc.IdentityAllocator.LookupIdentityByID(ctx, id.ID)
-		if realID == nil {
-			continue
-		}
-		released, err := ipc.IdentityAllocator.Release(ctx, realID, false)
-		if err != nil {
-			log.WithError(err).WithFields(logrus.Fields{
-				logfields.Identity:       realID,
-				logfields.IdentityLabels: realID.Labels,
-			}).Warning(
-				"Failed to release previously allocated identity during ipcache metadata injection.",
-			)
-		}
-
-		// A local identity can be shared by multiple IPCache entries.
-		// Therefore, it's possible that the identity that was
-		// previously allocated is still in use by other entries.
-		// Avoid removing references in the policy engine until we've
-		// removed reference to the identity.
-		if released {
-			idsToDelete[id.ID] = nil // SelectorCache removal
-
-			// Corner case: This prefix + identity was initially created by a direct Upsert(),
-			// but all identity references have been released. We should then delete this prefix.
-			if oldID, unmanaged := unmanagedPrefixes[prefix]; unmanaged && oldID.ID == id.ID {
-				entriesToDelete[prefix] = oldID
-				log.WithFields(logrus.Fields{
-					logfields.IPAddr:   prefix,
-					logfields.Identity: id,
-				}).Debug("Force-removing released prefix from the ipcache.")
-			}
-		}
-	}
-	if len(idsToDelete) > 0 {
-		if ipc.UpdatePolicyMaps(ctx, nil, idsToDelete) {
-			mutated = true
-		}
-	}
+	// Delete any no-longer-referenced prefixes.
+	// These will now revert to the world identity.
+	// This must happen *before* identities are released, or else there will be policy drops
 	for prefix, id := range entriesToDelete {
 		ipc.deleteLocked(prefix.String(), id.Source)
 	}
 
-	return remainingPrefixes, mutated, err
-}
-
-// UpdatePolicyMaps pushes updates for the specified identities into the policy
-// engine and ensures that they are propagated into the underlying datapaths.
-func (ipc *IPCache) UpdatePolicyMaps(ctx context.Context, addedIdentities, deletedIdentities map[identity.NumericIdentity]labels.LabelArray) (mutated bool) {
-	// GH-17962: Refactor to call (*Daemon).UpdateIdentities(), instead of
-	// re-implementing the same logic here. It will also allow removing the
-	// dependencies that are passed into this function.
-
-	start := time.Now()
-
-	var wg sync.WaitGroup
-	// SelectorCache.UpdateIdentities() asks for callers to avoid
-	// handing the same identity in both 'adds' and 'deletes'
-	// parameters here, so make two calls. These changes will not
-	// be propagated to the datapath until the UpdatePolicyMaps
-	// call below.
-	if len(deletedIdentities) != 0 {
-		if ipc.PolicyHandler.UpdateIdentities(nil, deletedIdentities, &wg) {
-			mutated = true
-		}
+	// Release our reference for all identities. If their refcount reaches zero, do a
+	// sanity check to ensure there are no stale prefixes remaining
+	idsToRelease := make([]identity.NumericIdentity, 0, len(previouslyAllocatedIdentities))
+	for _, id := range previouslyAllocatedIdentities {
+		idsToRelease = append(idsToRelease, id.ID)
 	}
-	if len(addedIdentities) != 0 {
-		if ipc.PolicyHandler.UpdateIdentities(addedIdentities, nil, &wg) {
-			mutated = true
-		}
+	deletedNIDs, err2 := ipc.IdentityAllocator.ReleaseLocalIdentities(idsToRelease...)
+	if err2 != nil {
+		// should be unreachable, as this only happens if we allocated a global identity
+		ipc.logger.Warn("BUG: Failed to release local identity", logfields.Error, err2)
 	}
 
-	policyImplementedWG := ipc.DatapathHandler.UpdatePolicyMaps(ctx, &wg)
-	policyImplementedWG.Wait()
+	// Scan all deallocated identities, looking for stale prefixes that still reference them
+	for _, deletedNID := range deletedNIDs {
+		for prefixStr := range ipc.identityToIPCache[deletedNID] {
+			prefix, err := cmtypes.ParsePrefixCluster(prefixStr)
+			if err != nil {
+				continue // unreachable
+			}
 
-	metrics.PolicyIncrementalUpdateDuration.WithLabelValues("local").Observe(time.Since(start).Seconds())
-	return mutated
+			// Corner case: This prefix + identity was initially created by a direct Upsert(),
+			// but all identity references have been released. We should then delete this prefix.
+			if oldID, unmanaged := unmanagedPrefixes[prefix]; unmanaged && oldID.ID == deletedNID {
+				ipc.logger.Debug(
+					"Force-removing released prefix from the ipcache.",
+					logfields.IPAddr, prefix,
+					logfields.Identity, oldID,
+				)
+				ipc.deleteLocked(prefix.String(), oldID.Source)
+			}
+		}
+	}
+
+	return remainingPrefixes, err
 }
 
 // resolveIdentity will either return a previously-allocated identity for the
@@ -673,15 +678,18 @@ func (ipc *IPCache) UpdatePolicyMaps(ctx context.Context, addedIdentities, delet
 //   - If the entry is not inserted (for instance, because the bpf IPCache map
 //     already has the same IP -> identity entry in the map), immediately release
 //     the reference.
-func (ipc *IPCache) resolveIdentity(ctx context.Context, prefix netip.Prefix, info prefixInfo, restoredIdentity identity.NumericIdentity) (*identity.Identity, bool, error) {
+func (ipc *IPCache) resolveIdentity(prefix cmtypes.PrefixCluster, info *resourceInfo) (*identity.Identity, bool, error) {
 	// Override identities always take precedence
-	if identityOverrideLabels, ok := info.identityOverride(); ok {
-		id, isNew, err := ipc.IdentityAllocator.AllocateIdentity(ctx, identityOverrideLabels, false, identity.InvalidIdentity)
+	if info.IdentityOverride() {
+		id, isNew, err := ipc.IdentityAllocator.AllocateLocalIdentity(info.ToLabels(), false, identity.InvalidIdentity)
 		if err != nil {
-			log.WithError(err).WithFields(logrus.Fields{
-				logfields.IPAddr: prefix,
-				logfields.Labels: identityOverrideLabels,
-			}).Warning("Failed to allocate new identity for prefix's IdentityOverrideLabels.")
+			ipc.logger.Warn(
+				"Failed to allocate new identity for prefix's IdentityOverrideLabels.",
+				logfields.Error, err,
+				logfields.ClusterID, prefix.ClusterID(),
+				logfields.IPAddr, prefix,
+				logfields.Labels, info.ToLabels(),
+			)
 		}
 		return id, isNew, err
 	}
@@ -692,9 +700,9 @@ func (ipc *IPCache) resolveIdentity(ctx context.Context, prefix netip.Prefix, in
 	ipc.metadata.mergeParentLabels(lbls, prefix)
 
 	// Enforce certain label invariants, e.g. adding or removing `reserved:world`.
-	lbls = resolveLabels(prefix, lbls)
+	resolveLabels(lbls, prefix)
 
-	if lbls.HasHostLabel() {
+	if prefix.ClusterID() == 0 && lbls.HasHostLabel() {
 		// Associate any new labels with the host identity.
 		//
 		// This case is a bit special, because other parts of Cilium
@@ -714,19 +722,21 @@ func (ipc *IPCache) resolveIdentity(ctx context.Context, prefix netip.Prefix, in
 		// As an extra gotcha, we need need to merge all labels for all IPs
 		// that resolve to the reserved:host identity, otherwise we can
 		// flap identities labels depending on which prefix writes first. See GH-28259.
-		i := ipc.updateReservedHostLabels(prefix, lbls)
+		i := ipc.updateReservedHostLabels(prefix.AsPrefix(), lbls)
 		return i, false, nil
 	}
 
 	// This should only ever allocate an identity locally on the node,
 	// which could theoretically fail if we ever allocate a very large
 	// number of identities.
-	id, isNew, err := ipc.IdentityAllocator.AllocateIdentity(ctx, lbls, false, restoredIdentity)
+	id, isNew, err := ipc.IdentityAllocator.AllocateLocalIdentity(lbls, false, info.requestedIdentity.ID())
 	if err != nil {
-		log.WithError(err).WithFields(logrus.Fields{
-			logfields.IPAddr: prefix,
-			logfields.Labels: lbls,
-		}).Warning("Failed to allocate new identity for prefix's Labels.")
+		ipc.logger.Warn(
+			"Failed to allocate new identity for prefix's Labels.",
+			logfields.Error, err,
+			logfields.IPAddr, prefix,
+			logfields.Labels, lbls,
+		)
 		return nil, false, err
 	}
 	if lbls.HasWorldLabel() {
@@ -755,9 +765,7 @@ func (ipc *IPCache) resolveIdentity(ctx context.Context, prefix netip.Prefix, in
 //
 // However, nodes *are* allowed to be selectable by CIDR and CIDR equivalents
 // if PolicyCIDRMatchesNodes() is true.
-func resolveLabels(prefix netip.Prefix, lbls labels.Labels) labels.Labels {
-	out := labels.NewFrom(lbls)
-
+func resolveLabels(lbls labels.Labels, prefix cmtypes.PrefixCluster) {
 	isNode := lbls.HasRemoteNodeLabel() || lbls.HasHostLabel()
 
 	isInCluster := (isNode ||
@@ -766,37 +774,35 @@ func resolveLabels(prefix netip.Prefix, lbls labels.Labels) labels.Labels {
 
 	// In-cluster entities must not have reserved:world.
 	if isInCluster {
-		out = out.Remove(labels.LabelWorld)
-		out = out.Remove(labels.LabelWorldIPv4)
-		out = out.Remove(labels.LabelWorldIPv6)
+		lbls.Remove(labels.LabelWorld)
+		lbls.Remove(labels.LabelWorldIPv4)
+		lbls.Remove(labels.LabelWorldIPv6)
 	}
 
 	// In-cluster entities must not have cidr or fqdn labels.
 	// Exception: nodes may, when PolicyCIDRMatchesNodes() is enabled.
 	if isInCluster && !(isNode && option.Config.PolicyCIDRMatchesNodes()) {
-		out = out.RemoveFromSource(labels.LabelSourceCIDR)
-		out = out.RemoveFromSource(labels.LabelSourceFQDN)
-		out = out.RemoveFromSource(labels.LabelSourceCIDRGroup)
+		lbls.RemoveFromSource(labels.LabelSourceCIDR)
+		lbls.RemoveFromSource(labels.LabelSourceFQDN)
+		lbls.RemoveFromSource(labels.LabelSourceCIDRGroup)
 	}
 
 	// Remove all labels with source `node:`, unless this is a node *and* node labels are enabled.
 	if !(isNode && option.Config.PerNodeLabelsEnabled()) {
-		out = out.RemoveFromSource(labels.LabelSourceNode)
+		lbls.RemoveFromSource(labels.LabelSourceNode)
 	}
 
 	// No empty labels allowed.
 	// Add in (cidr:<address/prefix>) label as a fallback.
 	// This should not be hit in production, but is used in tests.
-	if len(out) == 0 {
-		out = labels.GetCIDRLabels(prefix)
+	if len(lbls) == 0 {
+		maps.Copy(lbls, labels.GetCIDRLabels(prefix.AsPrefix()))
 	}
 
 	// add world if not in-cluster.
 	if !isInCluster {
-		out.AddWorldLabel(prefix.Addr())
+		lbls.AddWorldLabel(prefix.AsPrefix().Addr())
 	}
-
-	return out
 }
 
 // updateReservedHostLabels adds or removes labels that apply to the local host.
@@ -824,7 +830,10 @@ func (ipc *IPCache) updateReservedHostLabels(prefix netip.Prefix, lbls labels.La
 		newLabels.MergeLabels(l)
 	}
 
-	log.WithField(logfields.Labels, newLabels).Debug("Merged labels for reserved:host identity")
+	ipc.logger.Debug(
+		"Merged labels for reserved:host identity",
+		logfields.Labels, newLabels,
+	)
 
 	return identity.AddReservedIdentityWithLabels(identity.ReservedIdentityHost, newLabels)
 }
@@ -845,13 +854,13 @@ func appendAPIServerLabelsForDeletion(lbls labels.Labels, currentLabels labels.L
 // these changes down into the policy engine and ipcache datapath maps.
 func (ipc *IPCache) RemoveLabelsExcluded(
 	lbls labels.Labels,
-	toExclude map[netip.Prefix]struct{},
+	toExclude map[cmtypes.PrefixCluster]struct{},
 	rid types.ResourceID,
 ) {
 	ipc.metadata.Lock()
 	defer ipc.metadata.Unlock()
 
-	var affectedPrefixes []netip.Prefix
+	var affectedPrefixes []cmtypes.PrefixCluster
 	oldSet := ipc.metadata.filterByLabels(lbls)
 	for _, ip := range oldSet {
 		if _, ok := toExclude[ip]; !ok {
@@ -868,11 +877,11 @@ func (ipc *IPCache) RemoveLabelsExcluded(
 // full match.
 //
 // Assumes that the ipcache metadata read lock is taken!
-func (m *metadata) filterByLabels(filter labels.Labels) []netip.Prefix {
-	var matching []netip.Prefix
+func (m *metadata) filterByLabels(filter labels.Labels) []cmtypes.PrefixCluster {
+	var matching []cmtypes.PrefixCluster
 	sortedFilter := filter.SortedList()
-	for prefix, info := range m.m {
-		lbls := info.ToLabels()
+	for prefix := range m.m {
+		lbls := m.getLocked(prefix).ToLabels()
 		if bytes.Contains(lbls.SortedList(), sortedFilter) {
 			matching = append(matching, prefix)
 		}
@@ -883,10 +892,10 @@ func (m *metadata) filterByLabels(filter labels.Labels) []netip.Prefix {
 // remove asynchronously removes the labels association for a prefix.
 //
 // This function assumes that the ipcache metadata lock is held for writing.
-func (m *metadata) remove(prefix netip.Prefix, resource types.ResourceID, aux ...IPMetadata) []netip.Prefix {
+func (m *metadata) remove(prefix cmtypes.PrefixCluster, resource types.ResourceID, aux ...IPMetadata) []cmtypes.PrefixCluster {
 	prefix = canonicalPrefix(prefix)
 	info, ok := m.m[prefix]
-	if !ok || info[resource] == nil {
+	if !ok || info.byResource[resource] == nil {
 		return nil
 	}
 
@@ -895,14 +904,17 @@ func (m *metadata) remove(prefix netip.Prefix, resource types.ResourceID, aux ..
 	affected := m.findAffectedChildPrefixes(prefix)
 
 	for _, a := range aux {
-		info[resource].unmerge(a)
+		info.byResource[resource].unmerge(m.logger, a)
 	}
-	if !info[resource].isValid() {
-		delete(info, resource)
+	if !info.byResource[resource].isValid() {
+		delete(info.byResource, resource)
 	}
 	if !info.isValid() { // Labels empty, delete
 		delete(m.m, prefix)
-		m.prefixes.Delete(prefix)
+		m.prefixes.Delete(clusterID(prefix.ClusterID()), prefix.AsPrefix())
+	} else {
+		// erase flattened, we'll recompute on read
+		info.flattened = nil
 	}
 
 	return affected
@@ -978,7 +990,7 @@ func (ipc *IPCache) handleLabelInjection(ctx context.Context) error {
 	}
 
 	// Any prefixes that have failed and must be retried
-	var retry []netip.Prefix
+	var retry []cmtypes.PrefixCluster
 	var err error
 
 	idsToModify, rev := ipc.metadata.dequeuePrefixUpdates()
@@ -989,8 +1001,6 @@ func (ipc *IPCache) handleLabelInjection(ctx context.Context) error {
 		cs = len(idsToModify)
 	}
 
-	triggerPolicyUpdates := false
-
 	// Split ipcache updates in to chunks to reduce resource spikes.
 	// InjectLabels releases all identities only at the end of processing, so
 	// it may allocate up to `chunkSize` additional identities.
@@ -999,16 +1009,12 @@ func (ipc *IPCache) handleLabelInjection(ctx context.Context) error {
 		chunk := idsToModify[0:idx]
 		idsToModify = idsToModify[idx:]
 
-		var failed []netip.Prefix
+		var failed []cmtypes.PrefixCluster
 
 		// If individual prefixes failed injection, doInjectLabels() the set of failed prefixes
 		// and sets err. We must ensure the failed prefixes are re-queued for injection.
-		var mutated bool
-		failed, mutated, err = ipc.doInjectLabels(ctx, chunk)
+		failed, err = ipc.doInjectLabels(ctx, chunk)
 		retry = append(retry, failed...)
-		if mutated {
-			triggerPolicyUpdates = true
-		}
 		if err != nil {
 			break
 		}
@@ -1028,10 +1034,6 @@ func (ipc *IPCache) handleLabelInjection(ctx context.Context) error {
 		// if all prefixes were successfully injected, bump the revision
 		// so that any waiters are made aware.
 		ipc.metadata.setInjectedRevision(rev)
-	}
-
-	if triggerPolicyUpdates {
-		ipc.Configuration.PolicyUpdater.TriggerPolicyUpdates("identity labels changed")
 	}
 
 	// non-nil err will re-trigger this controller

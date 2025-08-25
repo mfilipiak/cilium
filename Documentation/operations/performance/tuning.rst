@@ -161,6 +161,9 @@ whether your installation is running with eBPF host-routing, run ``cilium status
 in any of the Cilium pods and look for the line reporting the status for
 "Host Routing" which should state "BPF".
 
+.. note::
+   BPF host routing is incompatible with Istio (see :gh-issue:`36022` for details).
+
 **Requirements:**
 
 * Kernel >= 5.10
@@ -444,9 +447,10 @@ should consider increasing the aggregation interval or rate limiting events.
 Increase Aggregation Interval
 -----------------------------
 
-By default Cilium generates a tracing event on every new connection, any time a packet
-contains TCP flags that have not been previously seen for the packet direction, and on
-average once per ``monitor-aggregation-interval``, which defaults to 5 seconds.
+By default Cilium generates a tracing event for send packets only on every new
+connection, any time a packet contains TCP flags that have not been previously
+seen for the packet direction, and on average once per ``monitor-aggregation-interval``,
+which defaults to 5 seconds.
 
 Depending on your network traffic patterns, the re-emitting of trace events per
 aggregation interval can make up a large part of the total events. Increasing the
@@ -721,10 +725,14 @@ sizing which can be done via ``bpf.mapDynamicSizeRatio``:
 
 Note that ``bpf.distributedLRU.enabled`` is off by default in Cilium for
 legacy reasons given enabling this setting on-the-fly is disruptive for
-in-flight traffic since the BPF maps have to be recreated. It is recommended
-to use the per-node configuration to gradually phase in this setting for
-new nodes joining the cluster. Alternatively, upon initial cluster creation
-it is recommended to consider enablement.
+in-flight traffic since the BPF maps have to be recreated.
+
+It is recommended to use the per-node configuration to gradually phase in
+this setting for new nodes joining the cluster. Alternatively, upon initial
+cluster creation it is recommended to consider enablement.
+
+Also, ``bpf.distributedLRU.enabled`` is currently only supported in combination
+with ``bpf.mapDynamicSizeRatio`` as opposed to statically sized map configuration.
 
 eBPF Map Sizing
 ===============

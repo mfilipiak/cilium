@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	envoy_config_route_v3 "github.com/cilium/proxy/go/envoy/config/route/v3"
-	envoy_type_matcher_v3 "github.com/cilium/proxy/go/envoy/type/matcher/v3"
+	envoy_config_route_v3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	envoy_type_matcher_v3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/utils/ptr"
@@ -519,7 +519,7 @@ func Test_pathPrefixMutation(t *testing.T) {
 		}
 
 		res := pathPrefixMutation(rewrite, &httpRoute)(route)
-		require.EqualValues(t, &envoy_type_matcher_v3.RegexMatchAndSubstitute{
+		require.Equal(t, &envoy_type_matcher_v3.RegexMatchAndSubstitute{
 			Pattern: &envoy_type_matcher_v3.RegexMatcher{
 				Regex: fmt.Sprintf(`^%s(/?)(.*)`, regexp.QuoteMeta(httpRoute.PathMatch.Prefix)),
 			},
@@ -539,7 +539,7 @@ func Test_pathPrefixMutation(t *testing.T) {
 		}
 
 		res := pathPrefixMutation(rewrite, &httpRoute)(route)
-		require.EqualValues(t, &envoy_type_matcher_v3.RegexMatchAndSubstitute{
+		require.Equal(t, &envoy_type_matcher_v3.RegexMatchAndSubstitute{
 			Pattern: &envoy_type_matcher_v3.RegexMatcher{
 				Regex: fmt.Sprintf(`^%s(/?)(.*)`, regexp.QuoteMeta(httpRoute.PathMatch.Prefix)),
 			},

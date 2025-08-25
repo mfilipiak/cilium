@@ -16,6 +16,47 @@ import (
 	"github.com/cilium/cilium/pkg/u8proto"
 )
 
+// newKey returns a PolicyKey representing the specified parameters in network
+// byte-order.
+func newKey(
+	trafficDirection trafficdirection.TrafficDirection,
+	id identity.NumericIdentity,
+	proto u8proto.U8proto,
+	dport uint16,
+	portPrefixLen uint8,
+) PolicyKey {
+	prefixLen := StaticPrefixBits
+	if proto != 0 || dport != 0 {
+		prefixLen += uint32(NexthdrBits)
+		if dport != 0 {
+			prefixLen += uint32(portPrefixLen)
+		}
+	}
+	return PolicyKey{
+		Prefixlen:        prefixLen,
+		Identity:         uint32(id),
+		TrafficDirection: uint8(trafficDirection),
+		Nexthdr:          uint8(proto),
+		DestPortNetwork:  byteorder.HostToNetwork16(dport),
+	}
+}
+
+// newEntry returns a PolicyEntry representing the specified parameters in
+// network byte-order.
+func newEntry(
+	proxyPortPriority policyTypes.ProxyPortPriority,
+	authReq policyTypes.AuthRequirement,
+	proxyPort uint16,
+	flags policyEntryFlags,
+) PolicyEntry {
+	return PolicyEntry{
+		ProxyPortNetwork:  byteorder.HostToNetwork16(proxyPort),
+		Flags:             flags,
+		AuthRequirement:   authReq,
+		ProxyPortPriority: proxyPortPriority,
+	}
+}
+
 // newAllowEntry returns an allow PolicyEntry for the specified parameters in
 // network byte-order.
 // This is separated out to be used in unit testing.
@@ -304,8 +345,7 @@ func TestPolicyMapWildcarding(t *testing.T) {
 			require.Equal(t, policyTypes.AuthRequirement(0), tt.args.authReq, "Test: %s data error: authType must be zero with a deny key", tt.name)
 		}
 
-		// Get key
-		key := NewKey(tt.args.trafficDirection, tt.args.id, tt.args.proto, tt.args.dport, tt.args.dportPrefixLen)
+		key := newKey(tt.args.trafficDirection, tt.args.id, tt.args.proto, tt.args.dport, tt.args.dportPrefixLen)
 
 		// Compure entry & validate key and entry
 		var entry PolicyEntry
@@ -460,28 +500,28 @@ func TestNewEntryFromPolicyEntry(t *testing.T) {
 		// Proxy tcp 80 to proxy port 1337
 		{
 			key: policyTypes.EgressKey().WithTCPPort(80).WithIdentity(1234),
-			in:  policyTypes.AllowEntry().WithProxyPort(1337).WithProxyPriority(42),
+			in:  policyTypes.AllowEntry().WithProxyPort(1337).WithListenerPriority(42),
 			want: PolicyEntry{
 				Flags: getPolicyEntryFlags(policyEntryFlagParams{
 					IsDeny:    false,
 					PrefixLen: 24,
 				}),
 				ProxyPortNetwork:  byteorder.HostToNetwork16(1337),
-				ProxyPortPriority: 255 - 42, //prio is inverted
+				ProxyPortPriority: 128 - 42, //prio is inverted
 			},
 		},
 
 		// proxy ports 4-7
 		{
 			key: policyTypes.EgressKey().WithTCPPortPrefix(4, 14).WithIdentity(1234),
-			in:  policyTypes.AllowEntry().WithProxyPort(1337).WithProxyPriority(42),
+			in:  policyTypes.AllowEntry().WithProxyPort(1337).WithListenerPriority(42),
 			want: PolicyEntry{
 				Flags: getPolicyEntryFlags(policyEntryFlagParams{
 					IsDeny:    false,
 					PrefixLen: 22,
 				}),
 				ProxyPortNetwork:  byteorder.HostToNetwork16(1337),
-				ProxyPortPriority: 255 - 42, //prio is inverted
+				ProxyPortPriority: 128 - 42, //prio is inverted
 			},
 		},
 	}

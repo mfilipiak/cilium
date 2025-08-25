@@ -6,6 +6,8 @@
 #include <linux/icmpv6.h>
 #include <linux/icmp.h>
 
+#include <bpf/config/node.h>
+
 #include "common.h"
 #include "utils.h"
 #include "ipv4.h"
@@ -13,6 +15,10 @@
 #include "dbg.h"
 #include "l4.h"
 #include "signal.h"
+#include "ipfrag.h"
+
+/* Traffic is allowed/dropped based on user-defined policies. */
+DECLARE_CONFIG(bool, enable_extended_ip_protocols, "Pass traffic with extended IP protocols")
 
 enum ct_action {
 	ACTION_UNSPEC,
@@ -33,7 +39,6 @@ enum ct_entry_type {
 	CT_ENTRY_SVC		= (1 << 2),
 };
 
-#ifdef ENABLE_IPV4
 struct ct_buffer4 {
 	struct ipv4_ct_tuple tuple;
 	struct ct_state ct_state;
@@ -41,9 +46,7 @@ struct ct_buffer4 {
 	int ret;
 	int l4_off;
 };
-#endif
 
-#ifdef ENABLE_IPV6
 struct ct_buffer6 {
 	struct ipv6_ct_tuple tuple;
 	struct ct_state ct_state;
@@ -51,14 +54,13 @@ struct ct_buffer6 {
 	int ret;
 	int l4_off;
 };
-#endif
 
 static __always_inline enum ct_action ct_tcp_select_action(union tcp_flags flags)
 {
 	if (unlikely(flags.value & (TCP_FLAG_RST | TCP_FLAG_FIN)))
 		return ACTION_CLOSE;
 
-	if (unlikely(flags.value & TCP_FLAG_SYN))
+	if (unlikely((flags.value & TCP_FLAG_SYN) && !(flags.value & TCP_FLAG_ACK)))
 		return ACTION_CREATE;
 
 	return ACTION_UNSPEC;
@@ -196,7 +198,7 @@ ct_lookup_fill_state(struct ct_state *state, const struct ct_entry *entry,
 		state->backend_id = (__u32)entry->backend_id;
 		state->syn = syn;
 	} else if (dir == CT_INGRESS || dir == CT_EGRESS) {
-#ifndef DISABLE_LOOPBACK_LB
+#ifdef USE_LOOPBACK_LB
 		state->loopback = entry->lb_loopback;
 #endif
 		state->node_port = entry->node_port;
@@ -204,9 +206,6 @@ ct_lookup_fill_state(struct ct_state *state, const struct ct_entry *entry,
 		state->proxy_redirect = entry->proxy_redirect;
 		state->from_l7lb = entry->from_l7lb;
 		state->from_tunnel = entry->from_tunnel;
-#ifndef HAVE_FIB_IFINDEX
-		state->ifindex = entry->ifindex;
-#endif
 	}
 }
 
@@ -302,12 +301,6 @@ __ct_lookup(const void *map, struct __ctx_buff *ctx, const void *tuple,
 		if (ct_entry_alive(entry))
 			*monitor = ct_update_timeout(entry, is_tcp, dir, seen_flags);
 
-		/* For backward-compatibility we need to update reverse NAT
-		 * index in the CT_SERVICE entry for old connections.
-		 */
-		if (dir == CT_SERVICE && entry->rev_nat_index == 0)
-			entry->rev_nat_index = ct_state->rev_nat_index;
-
 #ifdef CONNTRACK_ACCOUNTING
 		__sync_fetch_and_add(&entry->packets, 1);
 		__sync_fetch_and_add(&entry->bytes, ctx_full_len(ctx));
@@ -398,10 +391,16 @@ ct_lookup_select_tuple_type(enum ct_dir dir, enum ct_scope scope)
 /* The function determines whether an egress flow identified by the given
  * tuple is a reply.
  *
- * The datapath creates a CT entry in a reverse order. E.g., if a pod sends a
- * request to outside, the CT entry stored in the BPF map will be TUPLE_F_IN:
- * pod => outside. So, we can leverage this fact to determine whether the given
- * flow is a reply.
+ * The datapath creates a CT entry with addresses in a reverse order. If a
+ * connection to a pod is initiated from outside the cluster, the CT entry is:
+ *     TUPLE_F_IN: pod_addr:world_port -> world_addr:pod_port
+ * The tuple in the egress context in datapath is created with addresses in the
+ * correct order, but with ports reversed:
+ *     TUPLE_F_OUT: pod_addr:world_port -> world_addr:pod_port
+ *
+ * The only difference between these tuples is flags. Therefore, in the egress
+ * context, this function may be used to check whether the packet corresponds to
+ * an existing world->cluster connection.
  */
 #define DEFINE_FUNC_CT_IS_REPLY(FAMILY)						\
 static __always_inline bool							\
@@ -427,6 +426,7 @@ ipv6_extract_tuple(struct __ctx_buff *ctx, struct ipv6_ct_tuple *tuple)
 {
 	void *data, *data_end;
 	struct ipv6hdr *ip6;
+	fraginfo_t fraginfo;
 	int ret;
 
 	if (!revalidate_data(ctx, &data, &data_end, &ip6))
@@ -436,7 +436,7 @@ ipv6_extract_tuple(struct __ctx_buff *ctx, struct ipv6_ct_tuple *tuple)
 	ipv6_addr_copy(&tuple->daddr, (union v6addr *)&ip6->daddr);
 	ipv6_addr_copy(&tuple->saddr, (union v6addr *)&ip6->saddr);
 
-	ret = ipv6_hdrlen(ctx, &tuple->nexthdr);
+	ret = ipv6_hdrlen_with_fraginfo(ctx, &tuple->nexthdr, &fraginfo);
 	if (ret < 0)
 		return ret;
 
@@ -447,11 +447,8 @@ ipv6_extract_tuple(struct __ctx_buff *ctx, struct ipv6_ct_tuple *tuple)
 		     tuple->nexthdr != IPPROTO_UDP))
 		return DROP_CT_UNKNOWN_PROTO;
 
-	ret = l4_load_ports(ctx, ETH_HLEN + ret, &tuple->dport);
-	if (ret < 0)
-		return DROP_CT_INVALID_HDR;
-
-	return CTX_ACT_OK;
+	return ipv6_load_l4_ports(ctx, ip6, fraginfo, ETH_HLEN + ret,
+				  CT_EGRESS, &tuple->dport);
 }
 
 static __always_inline void ct_flip_tuple_dir6(struct ipv6_ct_tuple *tuple)
@@ -501,46 +498,66 @@ ipv6_ct_tuple_reverse(struct ipv6_ct_tuple *tuple)
 	ct_flip_tuple_dir6(tuple);
 }
 
+static __always_inline union v6addr
+ipv6_ct_reverse_tuple_saddr(const struct ipv6_ct_tuple *rtuple)
+{
+	return rtuple->daddr;
+}
+
+static __always_inline union v6addr
+ipv6_ct_reverse_tuple_daddr(const struct ipv6_ct_tuple *rtuple)
+{
+	return rtuple->saddr;
+}
+
 static __always_inline int
-ct_extract_ports6(struct __ctx_buff *ctx, int off, struct ipv6_ct_tuple *tuple)
+ct_extract_ports6(struct __ctx_buff *ctx, struct ipv6hdr *ip6, fraginfo_t fraginfo,
+		  int off, enum ct_dir dir, struct ipv6_ct_tuple *tuple)
 {
 	switch (tuple->nexthdr) {
-	case IPPROTO_ICMPV6:
-		if (1) {
-			__be16 identifier = 0;
-			__u8 type;
+	case IPPROTO_ICMPV6: {
+		__be16 identifier = 0;
+		__u8 type;
 
-			if (ctx_load_bytes(ctx, off, &type, 1) < 0)
-				return DROP_CT_INVALID_HDR;
-			if ((type == ICMPV6_ECHO_REQUEST || type == ICMPV6_ECHO_REPLY) &&
-			    ctx_load_bytes(ctx, off + offsetof(struct icmp6hdr,
-							       icmp6_dataun.u_echo.identifier),
-					    &identifier, 2) < 0)
-				return DROP_CT_INVALID_HDR;
+		/* Fragmented ECHO packets are not supported currently. Drop all
+		 * fragments, because letting the first fragment pass would be
+		 * useless anyway.
+		 * ICMP error packets are not supposed to be fragmented.
+		 */
+		if (unlikely(ipfrag_is_fragment(fraginfo)))
+			return DROP_INVALID;
 
-			tuple->sport = 0;
-			tuple->dport = 0;
+		if (ctx_load_bytes(ctx, off, &type, 1) < 0)
+			return DROP_CT_INVALID_HDR;
+		if ((type == ICMPV6_ECHO_REQUEST || type == ICMPV6_ECHO_REPLY) &&
+		    ctx_load_bytes(ctx, off + offsetof(struct icmp6hdr,
+						       icmp6_dataun.u_echo.identifier),
+				    &identifier, 2) < 0)
+			return DROP_CT_INVALID_HDR;
 
-			switch (type) {
-			case ICMPV6_DEST_UNREACH:
-			case ICMPV6_PKT_TOOBIG:
-			case ICMPV6_TIME_EXCEED:
-			case ICMPV6_PARAMPROB:
-				tuple->flags |= TUPLE_F_RELATED;
-				break;
+		tuple->sport = 0;
+		tuple->dport = 0;
 
-			case ICMPV6_ECHO_REPLY:
-				tuple->sport = identifier;
-				break;
+		switch (type) {
+		case ICMPV6_DEST_UNREACH:
+		case ICMPV6_PKT_TOOBIG:
+		case ICMPV6_TIME_EXCEED:
+		case ICMPV6_PARAMPROB:
+			tuple->flags |= TUPLE_F_RELATED;
+			break;
 
-			case ICMPV6_ECHO_REQUEST:
-				tuple->dport = identifier;
-				fallthrough;
-			default:
-				break;
-			}
+		case ICMPV6_ECHO_REPLY:
+			tuple->sport = identifier;
+			break;
+
+		case ICMPV6_ECHO_REQUEST:
+			tuple->dport = identifier;
+			fallthrough;
+		default:
+			break;
 		}
 		break;
+	}
 
 	/* TCP, UDP, and SCTP all have the ports at the same location */
 	case IPPROTO_TCP:
@@ -549,12 +566,16 @@ ct_extract_ports6(struct __ctx_buff *ctx, int off, struct ipv6_ct_tuple *tuple)
 	case IPPROTO_SCTP:
 #endif  /* ENABLE_SCTP */
 		/* load sport + dport into tuple */
-		if (l4_load_ports(ctx, off, &tuple->dport) < 0)
-			return DROP_CT_INVALID_HDR;
-
-		break;
+		return ipv6_load_l4_ports(ctx, ip6, fraginfo, off,
+					  dir, &tuple->dport);
 	default:
-		/* Can't handle extension headers yet */
+		/* See comment in ct_extract_ports4. */
+		if (CONFIG(enable_extended_ip_protocols)) {
+			tuple->sport = 0;
+			tuple->dport = 0;
+			break;
+		}
+		/* Unsupported L4 protocol */
 		return DROP_CT_UNKNOWN_PROTO;
 	}
 
@@ -566,15 +587,20 @@ DEFINE_FUNC_CT_IS_REPLY(6)
 
 static __always_inline int
 __ct_lookup6(const void *map, struct ipv6_ct_tuple *tuple, struct __ctx_buff *ctx,
-	     int l4_off, enum ct_dir dir, enum ct_scope scope, __u32 ct_entry_types,
-	     struct ct_state *ct_state, __u32 *monitor)
+	     fraginfo_t fraginfo, int l4_off, enum ct_dir dir, enum ct_scope scope,
+	     __u32 ct_entry_types, struct ct_state *ct_state, __u32 *monitor)
 {
 	bool is_tcp = tuple->nexthdr == IPPROTO_TCP;
 	union tcp_flags tcp_flags = { .value = 0 };
 	enum ct_action action;
 	enum ct_status ret;
 
-	if (is_tcp) {
+#ifdef ENABLE_IPV6_FRAGMENTS
+	if (unlikely(ipfrag_is_fragment(fraginfo)))
+		update_metrics(ctx_full_len(ctx), ct_to_metrics_dir(dir), REASON_FRAG_PACKET);
+#endif
+
+	if (is_tcp && ipfrag_has_l4_header(fraginfo)) {
 		if (l4_load_tcp_flags(ctx, l4_off, &tcp_flags) < 0)
 			return DROP_CT_INVALID_HDR;
 
@@ -621,38 +647,42 @@ out:
 
 /* An IPv6 version of ct_lazy_lookup4. */
 static __always_inline int
-ct_lazy_lookup6(const void *map, struct ipv6_ct_tuple *tuple,
-		struct __ctx_buff *ctx, int l4_off, enum ct_dir dir,
-		enum ct_scope scope, __u32 ct_entry_types,
-		struct ct_state *ct_state, __u32 *monitor)
+ct_lazy_lookup6(const void *map, struct ipv6_ct_tuple *tuple, struct __ctx_buff *ctx,
+		fraginfo_t fraginfo, int l4_off, enum ct_dir dir, enum ct_scope scope,
+		__u32 ct_entry_types, struct ct_state *ct_state, __u32 *monitor)
 {
 	tuple->flags = ct_lookup_select_tuple_type(dir, scope);
 
-	return __ct_lookup6(map, tuple, ctx, l4_off, dir, scope,
-			    ct_entry_types, ct_state, monitor);
+	return __ct_lookup6(map, tuple, ctx, fraginfo, l4_off, dir,
+			    scope, ct_entry_types, ct_state, monitor);
 }
 
 /* Offset must point to IPv6 */
 static __always_inline int ct_lookup6(const void *map,
 				      struct ipv6_ct_tuple *tuple,
-				      struct __ctx_buff *ctx, int l4_off,
-				      enum ct_dir dir, enum ct_scope scope,
+				      struct __ctx_buff *ctx, struct ipv6hdr *ip6,
+				      int l4_off, enum ct_dir dir, enum ct_scope scope,
 				      struct ct_state *ct_state,
 				      __u32 *monitor)
 {
+	fraginfo_t fraginfo;
 	int ret;
+
+	fraginfo = ipv6_get_fraginfo(ctx, ip6);
+	if (fraginfo < 0)
+		return (int)fraginfo;
 
 	tuple->flags = ct_lookup_select_tuple_type(dir, scope);
 
-	ret = ct_extract_ports6(ctx, l4_off, tuple);
+	ret = ct_extract_ports6(ctx, ip6, fraginfo, l4_off, dir, tuple);
 	if (ret < 0)
 		return ret;
 
 	if (scope == SCOPE_FORWARD)
 		__ipv6_ct_tuple_reverse(tuple);
 
-	return __ct_lookup6(map, tuple, ctx, l4_off, dir, scope,
-			    CT_ENTRY_ANY, ct_state, monitor);
+	return __ct_lookup6(map, tuple, ctx, fraginfo, l4_off, dir,
+			    scope, CT_ENTRY_ANY, ct_state, monitor);
 }
 
 static __always_inline int
@@ -660,10 +690,12 @@ ipv4_extract_tuple(struct __ctx_buff *ctx, struct ipv4_ct_tuple *tuple)
 {
 	void *data, *data_end;
 	struct iphdr *ip4;
-	int ret;
+	fraginfo_t fraginfo;
 
 	if (!revalidate_data(ctx, &data, &data_end, &ip4))
 		return DROP_INVALID;
+
+	fraginfo = ipfrag_encode_ipv4(ip4);
 
 	tuple->nexthdr = ip4->protocol;
 
@@ -677,12 +709,8 @@ ipv4_extract_tuple(struct __ctx_buff *ctx, struct ipv4_ct_tuple *tuple)
 	tuple->daddr = ip4->daddr;
 	tuple->saddr = ip4->saddr;
 
-	ret = ipv4_load_l4_ports(ctx, ip4, ETH_HLEN + ipv4_hdrlen(ip4),
-				 CT_EGRESS, &tuple->dport, NULL);
-	if (ret < 0)
-		return ret;
-
-	return CTX_ACT_OK;
+	return ipv4_load_l4_ports(ctx, ip4, fraginfo, ETH_HLEN + ipv4_hdrlen(ip4),
+				  CT_EGRESS, &tuple->dport);
 }
 
 static __always_inline void ct_flip_tuple_dir4(struct ipv4_ct_tuple *tuple)
@@ -744,45 +772,50 @@ ipv4_ct_reverse_tuple_daddr(const struct ipv4_ct_tuple *rtuple)
 }
 
 static __always_inline int
-ct_extract_ports4(struct __ctx_buff *ctx, struct iphdr *ip4, int off,
-		  enum ct_dir dir, struct ipv4_ct_tuple *tuple, bool *has_l4_header)
+ct_extract_ports4(struct __ctx_buff *ctx, struct iphdr *ip4, fraginfo_t fraginfo,
+		  int off, enum ct_dir dir, struct ipv4_ct_tuple *tuple)
 {
-	int err;
-
 	switch (tuple->nexthdr) {
-	case IPPROTO_ICMP:
-		if (1) {
-			__be16 identifier = 0;
-			__u8 type;
+	case IPPROTO_ICMP: {
+		__be16 identifier = 0;
+		__u8 type;
 
-			if (ctx_load_bytes(ctx, off, &type, 1) < 0)
-				return DROP_CT_INVALID_HDR;
-			if ((type == ICMP_ECHO || type == ICMP_ECHOREPLY) &&
-			     ctx_load_bytes(ctx, off + offsetof(struct icmphdr, un.echo.id),
-					    &identifier, 2) < 0)
-				return DROP_CT_INVALID_HDR;
+		/* Fragmented ECHO packets are not supported currently. Drop all
+		 * fragments, because letting the first fragment pass would be
+		 * useless anyway.
+		 * ICMP error packets are not supposed to be fragmented.
+		 */
+		if (unlikely(ipfrag_is_fragment(fraginfo)))
+			return DROP_INVALID;
 
-			tuple->sport = 0;
-			tuple->dport = 0;
+		if (ctx_load_bytes(ctx, off, &type, 1) < 0)
+			return DROP_CT_INVALID_HDR;
+		if ((type == ICMP_ECHO || type == ICMP_ECHOREPLY) &&
+		    ctx_load_bytes(ctx, off + offsetof(struct icmphdr, un.echo.id),
+				   &identifier, 2) < 0)
+			return DROP_CT_INVALID_HDR;
 
-			switch (type) {
-			case ICMP_DEST_UNREACH:
-			case ICMP_TIME_EXCEEDED:
-			case ICMP_PARAMETERPROB:
-				tuple->flags |= TUPLE_F_RELATED;
-				break;
+		tuple->sport = 0;
+		tuple->dport = 0;
 
-			case ICMP_ECHOREPLY:
-				tuple->sport = identifier;
-				break;
-			case ICMP_ECHO:
-				tuple->dport = identifier;
-				fallthrough;
-			default:
-				break;
-			}
+		switch (type) {
+		case ICMP_DEST_UNREACH:
+		case ICMP_TIME_EXCEEDED:
+		case ICMP_PARAMETERPROB:
+			tuple->flags |= TUPLE_F_RELATED;
+			break;
+
+		case ICMP_ECHOREPLY:
+			tuple->sport = identifier;
+			break;
+		case ICMP_ECHO:
+			tuple->dport = identifier;
+			fallthrough;
+		default:
+			break;
 		}
 		break;
+	}
 
 	/* TCP, UDP, and SCTP all have the ports at the same location */
 	case IPPROTO_TCP:
@@ -790,14 +823,16 @@ ct_extract_ports4(struct __ctx_buff *ctx, struct iphdr *ip4, int off,
 #ifdef ENABLE_SCTP
 	case IPPROTO_SCTP:
 #endif  /* ENABLE_SCTP */
-		err = ipv4_load_l4_ports(ctx, ip4, off, dir, &tuple->dport,
-					 has_l4_header);
-		if (err < 0)
-			return err;
-
-		break;
+		return ipv4_load_l4_ports(ctx, ip4, fraginfo, off,
+					  dir, &tuple->dport);
 	default:
-		/* Can't handle extension headers yet */
+		/* Traffic is allowed/dropped based on user-defined policies. */
+		if (CONFIG(enable_extended_ip_protocols)) {
+			tuple->sport = 0;
+			tuple->dport = 0;
+			break;
+		}
+		/* Unsupported L4 protocol */
 		return DROP_CT_UNKNOWN_PROTO;
 	}
 
@@ -809,9 +844,8 @@ DEFINE_FUNC_CT_IS_REPLY(4)
 
 static __always_inline int
 __ct_lookup4(const void *map, struct ipv4_ct_tuple *tuple, struct __ctx_buff *ctx,
-	     int l4_off, bool has_l4_header, bool is_fragment __maybe_unused,
-	     enum ct_dir dir, enum ct_scope scope, __u32 ct_entry_types,
-	     struct ct_state *ct_state, __u32 *monitor)
+	     fraginfo_t fraginfo, int l4_off, enum ct_dir dir, enum ct_scope scope,
+	     __u32 ct_entry_types, struct ct_state *ct_state, __u32 *monitor)
 {
 	bool is_tcp = tuple->nexthdr == IPPROTO_TCP;
 	union tcp_flags tcp_flags = { .value = 0 };
@@ -819,11 +853,11 @@ __ct_lookup4(const void *map, struct ipv4_ct_tuple *tuple, struct __ctx_buff *ct
 	enum ct_status ret;
 
 #ifdef ENABLE_IPV4_FRAGMENTS
-	if (unlikely(is_fragment))
+	if (unlikely(ipfrag_is_fragment(fraginfo)))
 		update_metrics(ctx_full_len(ctx), ct_to_metrics_dir(dir), REASON_FRAG_PACKET);
 #endif
 
-	if (is_tcp && has_l4_header) {
+	if (is_tcp && ipfrag_has_l4_header(fraginfo)) {
 		if (l4_load_tcp_flags(ctx, l4_off, &tcp_flags) < 0)
 			return DROP_CT_INVALID_HDR;
 
@@ -874,9 +908,8 @@ out:
  * @arg map		CT map
  * @arg tuple		CT tuple (with populated L4 ports)
  * @arg ctx		packet
- * @arg is_fragment	the result of ipv4_is_fragment(ip4)
+ * @arg fraginfo	fragment info encoded by ipfrag_encode_ipv4()
  * @arg l4_off		offset to L4 header
- * @arg has_l4_header	packet has L4 header
  * @arg dir		lookup direction
  * @arg scope		CT scope. For SCOPE_FORWARD, the tuple also needs to
  *			be in forward layout.
@@ -895,14 +928,13 @@ out:
  */
 static __always_inline int
 ct_lazy_lookup4(const void *map, struct ipv4_ct_tuple *tuple, struct __ctx_buff *ctx,
-		bool is_fragment, int l4_off, bool has_l4_header,
-		enum ct_dir dir, enum ct_scope scope, __u32 ct_entry_types,
-		struct ct_state *ct_state, __u32 *monitor)
+		fraginfo_t fraginfo, int l4_off, enum ct_dir dir, enum ct_scope scope,
+		__u32 ct_entry_types, struct ct_state *ct_state, __u32 *monitor)
 {
 	tuple->flags = ct_lookup_select_tuple_type(dir, scope);
 
-	return __ct_lookup4(map, tuple, ctx, l4_off, has_l4_header, is_fragment,
-			    dir, scope, ct_entry_types, ct_state, monitor);
+	return __ct_lookup4(map, tuple, ctx, fraginfo, l4_off, dir,
+			    scope, ct_entry_types, ct_state, monitor);
 }
 
 /* Offset must point to IPv4 header */
@@ -912,21 +944,22 @@ static __always_inline int ct_lookup4(const void *map,
 				      int off, enum ct_dir dir, enum ct_scope scope,
 				      struct ct_state *ct_state, __u32 *monitor)
 {
-	bool is_fragment = ipv4_is_fragment(ip4);
-	bool has_l4_header = true;
+	fraginfo_t fraginfo;
 	int ret;
+
+	fraginfo = ipfrag_encode_ipv4(ip4);
 
 	tuple->flags = ct_lookup_select_tuple_type(dir, scope);
 
-	ret = ct_extract_ports4(ctx, ip4, off, dir, tuple, &has_l4_header);
+	ret = ct_extract_ports4(ctx, ip4, fraginfo, off, dir, tuple);
 	if (ret < 0)
 		return ret;
 
 	if (scope == SCOPE_FORWARD)
 		__ipv4_ct_tuple_reverse(tuple);
 
-	return __ct_lookup4(map, tuple, ctx, off, has_l4_header, is_fragment,
-			    dir, scope, CT_ENTRY_ANY, ct_state, monitor);
+	return __ct_lookup4(map, tuple, ctx, fraginfo, off, dir,
+			    scope, CT_ENTRY_ANY, ct_state, monitor);
 }
 
 static __always_inline void
@@ -939,15 +972,12 @@ ct_create_fill_entry(struct ct_entry *entry, const struct ct_state *state,
 	if (dir == CT_SERVICE) {
 		entry->backend_id = state->backend_id;
 	} else if (dir == CT_INGRESS || dir == CT_EGRESS) {
-#ifndef DISABLE_LOOPBACK_LB
+#ifdef USE_LOOPBACK_LB
 		entry->lb_loopback = state->loopback;
 #endif
 		entry->node_port = state->node_port;
 		entry->dsr_internal = state->dsr_internal;
 		entry->from_tunnel = state->from_tunnel;
-#ifndef HAVE_FIB_IFINDEX
-		entry->ifindex = state->ifindex;
-#endif
 		/* Note if this is a proxy connection so that replies can be redirected
 		 * back to the proxy.
 		 */
@@ -1072,7 +1102,7 @@ err_ct_fill_up:
 	return DROP_CT_CREATE_FAILED;
 }
 
-#ifndef DISABLE_LOOPBACK_LB
+#ifdef USE_LOOPBACK_LB
 static __always_inline bool
 ct_has_loopback_egress_entry4(const void *map, struct ipv4_ct_tuple *tuple)
 {

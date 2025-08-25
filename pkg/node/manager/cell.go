@@ -4,18 +4,23 @@
 package manager
 
 import (
+	"log/slog"
+
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/job"
 	"github.com/cilium/statedb"
 
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/datapath/iptables/ipset"
 	"github.com/cilium/cilium/pkg/datapath/tables"
+	"github.com/cilium/cilium/pkg/datapath/tunnel"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/time"
+	wgTypes "github.com/cilium/cilium/pkg/wireguard/types"
 )
 
 // Cell provides the NodeManager, which manages information about Cilium nodes
@@ -25,6 +30,7 @@ var Cell = cell.Module(
 	"Manages the collection of Cilium nodes",
 	cell.Provide(newAllNodeManager),
 	cell.Provide(newGetClusterNodesRestAPIHandler),
+	cell.Provide(newNodeConfigNotifier),
 	metrics.Metric(NewNodeMetrics),
 )
 
@@ -43,8 +49,6 @@ type Notifier interface {
 }
 
 type NodeManager interface {
-	datapath.NodeNeighborEnqueuer
-
 	Notifier
 
 	// GetNodes returns a copy of all the nodes as a map from Identity to Node.
@@ -72,17 +76,16 @@ type NodeManager interface {
 	// avoid overloading these resources as the cluster grows.
 	ClusterSizeDependantInterval(baseInterval time.Duration) time.Duration
 
-	// StartNeighborRefresh spawns a controller which refreshes neighbor table
-	// by sending arping periodically.
-	StartNeighborRefresh(nh datapath.NodeNeighbors)
-
-	// StartNodeNeighborLinkUpdater spawns a controller that watches a queue
-	// for node neighbor link updates.
-	StartNodeNeighborLinkUpdater(nh datapath.NodeNeighbors)
+	// SetPrefixClusterMutatorFn allows to inject a custom prefix cluster mutator.
+	// The mutator may then be applied to the PrefixCluster(s) using cmtypes.PrefixClusterFrom,
+	// cmtypes.PrefixClusterFromCIDR and the like.
+	SetPrefixClusterMutatorFn(mutator func(*types.Node) []cmtypes.PrefixClusterOpts)
 }
 
 func newAllNodeManager(in struct {
 	cell.In
+	Logger      *slog.Logger
+	TunnelConf  tunnel.Config
 	Lifecycle   cell.Lifecycle
 	IPCache     *ipcache.IPCache
 	IPSetMgr    ipset.Manager
@@ -92,9 +95,10 @@ func newAllNodeManager(in struct {
 	JobGroup    job.Group
 	DB          *statedb.DB
 	Devices     statedb.Table[*tables.Device]
+	WGConfig    wgTypes.WireguardConfig
 },
 ) (NodeManager, error) {
-	mngr, err := New(option.Config, in.IPCache, in.IPSetMgr, in.IPSetFilter, in.NodeMetrics, in.Health, in.JobGroup, in.DB, in.Devices)
+	mngr, err := New(in.Logger, option.Config, in.TunnelConf, in.IPCache, in.IPSetMgr, in.IPSetFilter, in.NodeMetrics, in.Health, in.JobGroup, in.DB, in.Devices, in.WGConfig)
 	if err != nil {
 		return nil, err
 	}

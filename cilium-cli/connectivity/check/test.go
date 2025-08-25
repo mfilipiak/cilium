@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"time"
 
 	"github.com/blang/semver/v4"
@@ -68,6 +69,7 @@ func NewTest(name string, verbose bool, debug bool) *Test {
 		clrps:       make(map[string]*ciliumv2.CiliumLocalRedirectPolicy),
 		logBuf:      &bytes.Buffer{}, // maintain internal buffer by default
 		conditionFn: nil,
+		verbose:     verbose,
 	}
 	// Setting the internal buffer to nil causes the logger to
 	// write directly to stdout in verbose or debug mode.
@@ -140,8 +142,9 @@ type Test struct {
 
 	// Buffer to store output until it's flushed by a failure.
 	// Unused when run in verbose or debug mode.
-	logMu  lock.RWMutex
-	logBuf io.ReadWriter
+	logMu   lock.RWMutex
+	logBuf  io.ReadWriter
+	verbose bool
 
 	// conditionFn is a function that returns true if the test needs to run,
 	// and false otherwise. By default, it's set to a function that returns
@@ -164,6 +167,18 @@ func (t *Test) Name() string {
 
 func (t *Test) Failed() bool {
 	return t.failed
+}
+
+func (t *Test) FailureMessages() []string {
+	failureMessages := []string{}
+	for _, s := range t.scenarios {
+		for _, m := range s {
+			if m.failureMessage != "" {
+				failureMessages = append(failureMessages, m.failureMessage)
+			}
+		}
+	}
+	return failureMessages
 }
 
 // ScenarioName returns the Test name and Scenario name concatenated in
@@ -210,6 +225,9 @@ func (t *Test) setup(ctx context.Context) error {
 	}
 
 	if t.installIPRoutesFromOutsideToPodCIDRs {
+		// Attempt to cleanup any leftover routes in case tests previously
+		// didn't cleanup correctly.
+		t.Context().modifyStaticRoutesForNodesWithoutCilium(ctx, "del")
 		if err := t.Context().modifyStaticRoutesForNodesWithoutCilium(ctx, "add"); err != nil {
 			return fmt.Errorf("installing static routes: %w", err)
 		}
@@ -299,7 +317,10 @@ func (t *Test) willRun() (bool, string) {
 func (t *Test) finalize() {
 	t.Debug("Finalizing Test", t.Name())
 
-	for _, f := range t.finalizers {
+	// Iterate finalizers in backward order.
+	// As an example, first we create secrets that are referenced in policies.
+	// When performing cleanup, we want to first delete policies and then secrets.
+	for _, f := range slices.Backward(t.finalizers) {
 		// Use a detached context to make sure this call is not affected by
 		// context cancellation. Usually, finalization (e.g., netpol removal)
 		// needs to happen even when the user interrupted the program.
@@ -503,6 +524,9 @@ type CiliumEgressGatewayPolicyParams struct {
 
 	// ExcludedCIDRsConf controls how the ExcludedCIDRsConf property should be configured
 	ExcludedCIDRsConf ExcludedCIDRsKind
+
+	// Includes changes for multigateway testing
+	Multigateway bool
 }
 
 // WithCiliumEgressGatewayPolicy takes a string containing a YAML policy
@@ -544,17 +568,42 @@ func (t *Test) WithCiliumEgressGatewayPolicy(params CiliumEgressGatewayPolicyPar
 
 	pl.Spec.EgressGateway.NodeSelector.MatchLabels["kubernetes.io/hostname"] = egressGatewayNode
 
+	// If the field EgressGateways is set, the contents of the field EgressGateway are disregarded.
+	if params.Multigateway && versioncheck.MustCompile(">=1.18.0")(t.ctx.CiliumVersion) {
+		egressGatewayNodes := t.EgressGatewayNodes()
+		for _, node := range egressGatewayNodes {
+			gw := pl.Spec.EgressGateway.DeepCopy()
+			gw.NodeSelector.MatchLabels["kubernetes.io/hostname"] = node
+			pl.Spec.EgressGateways = append(pl.Spec.EgressGateways, *gw)
+		}
+	}
+
+	var ipv6Enabled bool
+	if status, ok := t.ctx.Feature(features.IPv6); ok && status.Enabled && versioncheck.MustCompile(">=1.18.0")(t.ctx.CiliumVersion) {
+		ipv6Enabled = true
+	}
+
+	// If IPv6 egress policies are enabled, add the necessary destination CIDR
+	if ipv6Enabled {
+		pl.Spec.DestinationCIDRs = append(pl.Spec.DestinationCIDRs, "::/0")
+	}
+
 	// Set the excluded CIDRs
-	pl.Spec.ExcludedCIDRs = []ciliumv2.IPv4CIDR{}
+	pl.Spec.ExcludedCIDRs = []ciliumv2.CIDR{}
 
 	switch params.ExcludedCIDRsConf {
 	case ExternalNodeExcludedCIDRs:
 		for _, nodeWithoutCiliumIP := range t.Context().params.NodesWithoutCiliumIPs {
 			if parsedIP := net.ParseIP(nodeWithoutCiliumIP.IP); parsedIP.To4() == nil {
+				// If it is an IPv6 address, add the necessary excluded CIDR
+				if ipv6Enabled {
+					cidr := ciliumv2.CIDR(fmt.Sprintf("%s/128", nodeWithoutCiliumIP.IP))
+					pl.Spec.ExcludedCIDRs = append(pl.Spec.ExcludedCIDRs, cidr)
+				}
 				continue
 			}
 
-			cidr := ciliumv2.IPv4CIDR(fmt.Sprintf("%s/32", nodeWithoutCiliumIP.IP))
+			cidr := ciliumv2.CIDR(fmt.Sprintf("%s/32", nodeWithoutCiliumIP.IP))
 			pl.Spec.ExcludedCIDRs = append(pl.Spec.ExcludedCIDRs, cidr)
 		}
 	}
@@ -562,6 +611,9 @@ func (t *Test) WithCiliumEgressGatewayPolicy(params CiliumEgressGatewayPolicyPar
 	t.resources = append(t.resources, &pl)
 
 	t.WithFeatureRequirements(features.RequireEnabled(features.EgressGateway))
+	if params.Multigateway {
+		t.WithCiliumVersion(">=1.18.0")
+	}
 
 	return t
 }
@@ -790,6 +842,17 @@ func (t *Test) NewGenericAction(s Scenario, name string) *Action {
 	return t.NewAction(s, name, nil, nil, features.IPFamilyAny)
 }
 
+// Scenarios returns a slice of all Scenarios belonging to the Test.
+func (t *Test) Scenarios() []Scenario {
+	var out []Scenario
+
+	for s := range t.scenarios {
+		out = append(out, s)
+	}
+
+	return out
+}
+
 // failedActions returns a list of failed Actions in the Test.
 func (t *Test) failedActions() []*Action {
 	var out []*Action
@@ -821,6 +884,19 @@ func (t *Test) EgressGatewayNode() string {
 	}
 
 	return ""
+}
+
+// Like EgressGatewayNode() but for the multigateway test case.
+// In this case we use the pods with labels other=client and other=client-other-node.
+func (t *Test) EgressGatewayNodes() []string {
+	var out []string
+	for _, clientPod := range t.ctx.clientPods {
+		if clientPod.Pod.Labels["other"] == "client" ||
+			clientPod.Pod.Labels["other"] == "client-other-node" {
+			out = append(out, clientPod.Pod.Spec.NodeName)
+		}
+	}
+	return out
 }
 
 func (t *Test) collectSysdump() {
@@ -855,10 +931,5 @@ func (t *Test) CiliumLocalRedirectPolicies() map[string]*ciliumv2.CiliumLocalRed
 }
 
 func (t *Test) HasNetworkPolicies() bool {
-	for _, obj := range t.resources {
-		if isPolicy(obj) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(t.resources, isPolicy)
 }

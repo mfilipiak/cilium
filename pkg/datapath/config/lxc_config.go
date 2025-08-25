@@ -12,36 +12,43 @@ type BPFLXC struct {
 	// MTU of the device the bpf program is attached to (default: MTU set in
 	// node_config.h by agent).
 	DeviceMTU uint16 `config:"device_mtu"`
+	// Pass traffic with extended IP protocols.
+	EnableExtendedIPProtocols bool `config:"enable_extended_ip_protocols"`
+	// Masquerade traffic to remote nodes.
+	EnableRemoteNodeMasquerade bool `config:"enable_remote_node_masquerade"`
 	// The endpoint's security ID.
 	EndpointID uint16 `config:"endpoint_id"`
 	// The endpoint's IPv4 address.
-	EndpointIPv4 uint32 `config:"endpoint_ipv4"`
-	// The endpoint's first 64 bits of the IPv6 address.
-	EndpointIPv61 uint64 `config:"endpoint_ipv6_1"`
-	// The endpoint's second 64 bits of the IPv6 address.
-	EndpointIPv62 uint64 `config:"endpoint_ipv6_2"`
+	EndpointIPv4 [4]byte `config:"endpoint_ipv4"`
+	// The endpoint's IPv6 address.
+	EndpointIPv6 [16]byte `config:"endpoint_ipv6"`
 	// The endpoint's network namespace cookie.
 	EndpointNetNSCookie uint64 `config:"endpoint_netns_cookie"`
+	// The host endpoint's security ID.
+	HostEpID uint16 `config:"host_ep_id"`
 	// Ifindex of the interface the bpf program is attached to.
 	InterfaceIfindex uint32 `config:"interface_ifindex"`
-	// First 32 bits of the MAC address of the interface the bpf program is
-	// attached to.
-	InterfaceMAC1 uint32 `config:"interface_mac_1"`
-	// Latter 16 bits of the MAC address of the interface the bpf program is
-	// attached to.
-	InterfaceMAC2 uint16 `config:"interface_mac_2"`
+	// MAC address of the interface the bpf program is attached to.
+	InterfaceMAC [8]byte `config:"interface_mac"`
 	// Masquerade address for IPv4 traffic.
-	NATIPv4Masquerade uint32 `config:"nat_ipv4_masquerade"`
-	// First half of the masquerade address for IPv6 traffic.
-	NATIPv6Masquerade1 uint64 `config:"nat_ipv6_masquerade_1"`
-	// Second half of the masquerade address for IPv6 traffic.
-	NATIPv6Masquerade2 uint64 `config:"nat_ipv6_masquerade_2"`
+	NATIPv4Masquerade [4]byte `config:"nat_ipv4_masquerade"`
+	// Masquerade address for IPv6 traffic.
+	NATIPv6Masquerade [16]byte `config:"nat_ipv6_masquerade"`
 	// The log level for policy verdicts in workload endpoints.
 	PolicyVerdictLogFilter uint32 `config:"policy_verdict_log_filter"`
+	// Pull security context from IP cache.
+	SecctxFromIPCache bool `config:"secctx_from_ipcache"`
 	// The endpoint's security label.
 	SecurityLabel uint32 `config:"security_label"`
+
+	Node
 }
 
-func NewBPFLXC() *BPFLXC {
-	return &BPFLXC{0x5dc, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0}
+func NewBPFLXC(node Node) *BPFLXC {
+	return &BPFLXC{0x5dc, false, false, 0x0, [4]byte{0x0, 0x0, 0x0, 0x0},
+		[16]byte{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
+		0x0, 0x0, 0x0, [8]byte{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
+		[4]byte{0x0, 0x0, 0x0, 0x0},
+		[16]byte{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
+		0x0, false, 0x0, node}
 }

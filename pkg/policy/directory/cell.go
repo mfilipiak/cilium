@@ -5,12 +5,13 @@ package directory
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 
 	"github.com/cilium/hive/cell"
-	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
 
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	policycell "github.com/cilium/cilium/pkg/policy/cell"
 )
@@ -33,9 +34,11 @@ type DirectoryWatcherReadStatus interface {
 type PolicyWatcherParams struct {
 	cell.In
 
-	Lifecycle cell.Lifecycle
-	Logger    logrus.FieldLogger
-	Importer  policycell.PolicyImporter
+	Lifecycle               cell.Lifecycle
+	Logger                  *slog.Logger
+	Importer                policycell.PolicyImporter
+	ClusterInfo             cmtypes.ClusterInfo
+	ClusterMeshPolicyConfig cmtypes.PolicyConfig
 }
 
 type Config struct {
@@ -83,6 +86,7 @@ func newPolicyWatcher(p PolicyWatcherParams, cfg Config) *policyWatcher {
 		log:                p.Logger,
 		policyImporter:     p.Importer,
 		config:             cfg,
+		clusterName:        cmtypes.LocalClusterNameForPolicies(p.ClusterMeshPolicyConfig, p.ClusterInfo.Name),
 		fileNameToCnpCache: make(map[string]*cilium_v2.CiliumNetworkPolicy),
 	}
 	w.synced.Add(1)

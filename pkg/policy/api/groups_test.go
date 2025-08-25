@@ -48,7 +48,7 @@ func TestGetCIDRSetWithValidValue(t *testing.T) {
 		{Cidr: "192.168.1.1/32", ExceptCIDRs: []CIDR{}, Generated: true}}
 	group := GetGroupsRule()
 	cidr, err := group.GetCidrSet(context.TODO())
-	require.EqualValues(t, expectedCidrRule, cidr)
+	require.Equal(t, expectedCidrRule, cidr)
 	require.NoError(t, err)
 }
 
@@ -61,7 +61,7 @@ func TestGetCIDRSetWithMultipleSorted(t *testing.T) {
 		{Cidr: "192.168.10.10/32", ExceptCIDRs: []CIDR{}, Generated: true}}
 	group := GetGroupsRule()
 	cidr, err := group.GetCidrSet(context.TODO())
-	require.EqualValues(t, expectedCidrRule, cidr)
+	require.Equal(t, expectedCidrRule, cidr)
 	require.NoError(t, err)
 }
 
@@ -75,13 +75,11 @@ func TestGetCIDRSetWithUniqueCIDRRule(t *testing.T) {
 
 	group := GetGroupsRule()
 	cidr, err := group.GetCidrSet(context.TODO())
-	require.EqualValues(t, cidrRule, cidr)
+	require.Equal(t, cidrRule, cidr)
 	require.NoError(t, err)
 }
 
 func TestGetCIDRSetWithError(t *testing.T) {
-	setUpSuite(t)
-
 	cb := func(ctx context.Context, group *Groups) ([]netip.Addr, error) {
 		return []netip.Addr{}, fmt.Errorf("Invalid credentials")
 	}
@@ -93,8 +91,6 @@ func TestGetCIDRSetWithError(t *testing.T) {
 }
 
 func TestWithoutProviderRegister(t *testing.T) {
-	setUpSuite(t)
-
 	providers.Delete(AWSProvider)
 	group := GetGroupsRule()
 	cidr, err := group.GetCidrSet(context.TODO())
@@ -107,8 +103,8 @@ func BenchmarkGetCIDRSet(b *testing.B) {
 	RegisterToGroupsProvider(AWSProvider, cb)
 	group := GetGroupsRule()
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		_, err := group.GetCidrSet(context.TODO())
 		if err != nil {
 			b.Fatal(err)

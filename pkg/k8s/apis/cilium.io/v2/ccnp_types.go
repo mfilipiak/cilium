@@ -5,6 +5,7 @@ package v2
 
 import (
 	"fmt"
+	"log/slog"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -77,7 +78,7 @@ type CiliumClusterwideNetworkPolicyList struct {
 
 // Parse parses a CiliumClusterwideNetworkPolicy and returns a list of cilium
 // policy rules.
-func (r *CiliumClusterwideNetworkPolicy) Parse() (api.Rules, error) {
+func (r *CiliumClusterwideNetworkPolicy) Parse(logger *slog.Logger, clusterName string) (api.Rules, error) {
 	if r.ObjectMeta.Name == "" {
 		return nil, NewErrParse("CiliumClusterwideNetworkPolicy must have name")
 	}
@@ -95,16 +96,15 @@ func (r *CiliumClusterwideNetworkPolicy) Parse() (api.Rules, error) {
 		if err := r.Spec.Sanitize(); err != nil {
 			return nil, NewErrParse(fmt.Sprintf("Invalid CiliumClusterwideNetworkPolicy spec: %s", err))
 		}
-		cr := k8sCiliumUtils.ParseToCiliumRule("", name, uid, r.Spec)
+		cr := k8sCiliumUtils.ParseToCiliumRule(logger, clusterName, "", name, uid, r.Spec)
 		retRules = append(retRules, cr)
 	}
 	if r.Specs != nil {
 		for _, rule := range r.Specs {
 			if err := rule.Sanitize(); err != nil {
 				return nil, NewErrParse(fmt.Sprintf("Invalid CiliumClusterwideNetworkPolicy specs: %s", err))
-
 			}
-			cr := k8sCiliumUtils.ParseToCiliumRule("", name, uid, rule)
+			cr := k8sCiliumUtils.ParseToCiliumRule(logger, clusterName, "", name, uid, rule)
 			retRules = append(retRules, cr)
 		}
 	}

@@ -5,8 +5,6 @@ package annotation
 
 import (
 	"regexp"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -15,6 +13,9 @@ const (
 
 	// ConfigPrefix is the common prefix for configuration related annotations.
 	ConfigPrefix = "config.cilium.io"
+
+	// ClusterMeshPrefix is the common prefix for ClusterMesh related annotations.
+	ClusterMeshPrefix = "clustermesh.cilium.io"
 
 	// IngressPrefix is the common prefix for ingress related annotations.
 	IngressPrefix = "ingress.cilium.io"
@@ -120,6 +121,10 @@ const (
 	ServiceAffinity      = ServicePrefix + "/affinity"
 	ServiceAffinityAlias = Prefix + "/service-affinity"
 
+	// CoreDNSAutoPatched is the annotation used to roll out CoreDNS once we
+	// we have patched its configuration to enabled MCS-API support.
+	CoreDNSAutoPatched = ClusterMeshPrefix + "/autoPatchedAt"
+
 	// ServiceLoadBalancingAlgorithm indicates which backend selection algorithm
 	// for a given Service to use. This annotation will override the default
 	// value set in bpf-lb-algorithm.
@@ -210,18 +215,25 @@ const (
 	LBIPAMSharingAcrossNamespace      = LBIPAMPrefix + "/sharing-cross-namespace"
 	LBIPAMSharingAcrossNamespaceAlias = Prefix + "/lb-ipam-sharing-cross-namespace"
 
-	CECInjectCiliumFilters = CECPrefix + "/inject-cilium-filters"
+	CECInjectCiliumFilters      = CECPrefix + "/inject-cilium-filters"
+	CECIsL7LB                   = CECPrefix + "/is-l7lb"
+	CECUseOriginalSourceAddress = CECPrefix + "/use-original-source-address"
 )
 
 // CiliumPrefixRegex is a regex matching Cilium specific annotations.
 var CiliumPrefixRegex = regexp.MustCompile(`^([A-Za-z0-9]+\.)*cilium.io/`)
 
+type annotatedObject interface {
+	GetAnnotations() map[string]string
+}
+
 // Get returns the annotation value associated with the given key, or any of
 // the additional aliases if not found.
-func Get(obj metav1.Object, key string, aliases ...string) (value string, ok bool) {
+func Get(obj annotatedObject, key string, aliases ...string) (value string, ok bool) {
 	keys := append([]string{key}, aliases...)
+	annotations := obj.GetAnnotations()
 	for _, k := range keys {
-		if value, ok = obj.GetAnnotations()[k]; ok {
+		if value, ok = annotations[k]; ok {
 			return value, ok
 		}
 	}

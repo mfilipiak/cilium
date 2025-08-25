@@ -91,7 +91,7 @@ func printMetrics(o io.Writer, metrics []Metric, prefix string, separators []str
 		printed = map[string]struct{}{}
 	)
 	for _, separator := range separators {
-		groupName := strings.Replace(prefix+"_"+separator, "_", "-", -1)
+		groupName := strings.ReplaceAll(prefix+"_"+separator, "_", "-")
 		fmt.Fprintf(o, ".. _%s:\n\n"+
 			"``%s``\n"+
 			"%s\n",
@@ -279,8 +279,7 @@ func parseMetricsFromProm(promFile io.Reader) []Metric {
 // Parse label string into a map
 func parseLabels(labelsPart string) map[string]map[string]struct{} {
 	labels := make(map[string]map[string]struct{})
-	labelPairs := strings.Split(labelsPart, ",")
-	for _, pair := range labelPairs {
+	for pair := range strings.SplitSeq(labelsPart, ",") {
 		parts := strings.Split(pair, "=")
 		if len(parts) == 2 {
 			if labels[parts[0]] == nil {

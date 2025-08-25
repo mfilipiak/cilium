@@ -16,7 +16,7 @@ import (
 func TestDecodeDropNotify(t *testing.T) {
 	// This check on the struct length constant is there to ensure that this
 	// test is updated when the struct changes.
-	require.Equal(t, 36, DropNotifyV1Len)
+	require.Equal(t, 40, dropNotifyV2Len)
 
 	input := DropNotify{
 		Type:     0x00,
@@ -25,7 +25,7 @@ func TestDecodeDropNotify(t *testing.T) {
 		Hash:     0x04_05_06_07,
 		OrigLen:  0x08_09_0a_0b,
 		CapLen:   0x0c_0d,
-		Version:  0x01,
+		Version:  0x02,
 		SrcLabel: 0x11_12_13_14,
 		DstLabel: 0x15_16_17_18,
 		DstID:    0x19_1a_1b_1c,
@@ -33,13 +33,14 @@ func TestDecodeDropNotify(t *testing.T) {
 		File:     0x20,
 		ExtError: 0x21,
 		Ifindex:  0x22_23_24_25,
+		Flags:    0x0f,
 	}
 	buf := bytes.NewBuffer(nil)
 	err := binary.Write(buf, byteorder.Native, input)
 	require.NoError(t, err)
 
 	output := &DropNotify{}
-	err = DecodeDropNotify(buf.Bytes(), output)
+	err = output.Decode(buf.Bytes())
 	require.NoError(t, err)
 
 	require.Equal(t, input.Type, output.Type)
@@ -55,9 +56,28 @@ func TestDecodeDropNotify(t *testing.T) {
 	require.Equal(t, input.File, output.File)
 	require.Equal(t, input.ExtError, output.ExtError)
 	require.Equal(t, input.Ifindex, output.Ifindex)
+	require.Equal(t, input.Flags, output.Flags)
+	require.True(t, output.IsL3Device())
+	require.True(t, output.IsIPv6())
+	require.True(t, output.IsVXLAN())
+	require.True(t, output.IsGeneve())
 }
 
-func BenchmarkNewDecodeDropNotify(b *testing.B) {
+func TestDecodeDropNotifyErrors(t *testing.T) {
+	n := DropNotify{}
+	err := n.Decode([]byte{})
+	require.Error(t, err)
+	require.Equal(t, "unexpected DropNotify data length, expected at least 36 but got 0", err.Error())
+
+	// invalid version
+	ev := make([]byte, dropNotifyV2Len)
+	ev[14] = 0xff
+	err = n.Decode(ev)
+	require.Error(t, err)
+	require.Equal(t, "Unrecognized drop event (version 255)", err.Error())
+}
+
+func BenchmarkDecodeDropNotifyV1(b *testing.B) {
 	input := DropNotify{}
 	buf := bytes.NewBuffer(nil)
 
@@ -66,18 +86,17 @@ func BenchmarkNewDecodeDropNotify(b *testing.B) {
 	}
 
 	b.ReportAllocs()
-	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		dn := &DropNotify{}
-		if err := DecodeDropNotify(buf.Bytes(), dn); err != nil {
+		if err := dn.Decode(buf.Bytes()); err != nil {
 			b.Fatal(err)
 		}
 	}
 }
 
-func BenchmarkOldDecodeDropNotify(b *testing.B) {
-	input := DropNotify{}
+func BenchmarkDecodeDropNotifyV2(b *testing.B) {
+	input := DropNotify{Version: DropNotifyVersion2}
 	buf := bytes.NewBuffer(nil)
 
 	if err := binary.Write(buf, byteorder.Native, input); err != nil {
@@ -85,11 +104,10 @@ func BenchmarkOldDecodeDropNotify(b *testing.B) {
 	}
 
 	b.ReportAllocs()
-	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		dn := &DropNotify{}
-		if err := binary.Read(bytes.NewReader(buf.Bytes()), byteorder.Native, dn); err != nil {
+		if err := dn.Decode(buf.Bytes()); err != nil {
 			b.Fatal(err)
 		}
 	}

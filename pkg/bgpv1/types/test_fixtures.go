@@ -58,7 +58,7 @@ var (
 				Statements: []*RoutePolicyStatement{
 					{
 						Conditions: RoutePolicyConditions{
-							MatchNeighbors: []string{"172.16.0.1/32"},
+							MatchNeighbors: []netip.Addr{netip.MustParseAddr("172.16.0.1")},
 							MatchPrefixes: []*RoutePolicyPrefixMatch{
 								{
 									CIDR:         netip.MustParsePrefix("1.2.3.0/24"),
@@ -72,6 +72,9 @@ var (
 							AddCommunities:      []string{"65000:100"},
 							AddLargeCommunities: []string{"4294967295:0:100"},
 							SetLocalPreference:  ptr.To[int64](150),
+							NextHop: &RoutePolicyActionNextHop{
+								Self: true,
+							},
 						},
 					},
 				},
@@ -86,7 +89,7 @@ var (
 				Statements: []*RoutePolicyStatement{
 					{
 						Conditions: RoutePolicyConditions{
-							MatchNeighbors: []string{"172.16.0.1/32", "10.10.10.10/32"},
+							MatchNeighbors: []netip.Addr{netip.MustParseAddr("172.16.0.1"), netip.MustParseAddr("10.10.10.10")},
 							MatchPrefixes: []*RoutePolicyPrefixMatch{
 								{
 									CIDR:         netip.MustParsePrefix("1.2.3.0/24"),
@@ -110,11 +113,14 @@ var (
 							RouteAction:        RoutePolicyActionNone,
 							AddCommunities:     []string{"65000:100", "65000:101"},
 							SetLocalPreference: ptr.To[int64](150),
+							NextHop: &RoutePolicyActionNextHop{
+								Unchanged: true,
+							},
 						},
 					},
 					{
 						Conditions: RoutePolicyConditions{
-							MatchNeighbors: []string{"fe80::210:5aff:feaa:20a2/128"},
+							MatchNeighbors: []netip.Addr{netip.MustParseAddr("fe80::210:5aff:feaa:20a2")},
 							MatchPrefixes: []*RoutePolicyPrefixMatch{
 								{
 									CIDR:         netip.MustParsePrefix("2001:0DB8::/64"),
@@ -153,7 +159,7 @@ var (
 					// valid statement
 					{
 						Conditions: RoutePolicyConditions{
-							MatchNeighbors: []string{"172.16.0.1/32"},
+							MatchNeighbors: []netip.Addr{netip.MustParseAddr("172.16.0.1")},
 							MatchPrefixes: []*RoutePolicyPrefixMatch{
 								{
 									CIDR:         netip.MustParsePrefix("1.2.3.0/24"),
@@ -171,7 +177,7 @@ var (
 					// invalid statement - wrong neighbor address
 					{
 						Conditions: RoutePolicyConditions{
-							MatchNeighbors: []string{"ABCD"},
+							MatchNeighbors: []netip.Addr{{}},
 							MatchPrefixes: []*RoutePolicyPrefixMatch{
 								{
 									CIDR:         netip.MustParsePrefix("192.188.0.0/16"),

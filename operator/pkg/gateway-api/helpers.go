@@ -6,6 +6,7 @@ package gateway_api
 import (
 	"context"
 	"log/slog"
+	"maps"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -78,7 +79,7 @@ func isAllowed(ctx context.Context, c client.Client, gw *gatewayv1.Gateway, rout
 			nsList := &corev1.NamespaceList{}
 			selector, _ := metav1.LabelSelectorAsSelector(listener.AllowedRoutes.Namespaces.Selector)
 			if err := c.List(ctx, nsList, client.MatchingLabelsSelector{Selector: selector}); err != nil {
-				logger.Error("Unable to list namespaces", logfields.Error, err)
+				logger.ErrorContext(ctx, "Unable to list namespaces", logfields.Error, err)
 				return false
 			}
 
@@ -167,9 +168,7 @@ func mergeMap(left, right map[string]string) map[string]string {
 	if left == nil {
 		return right
 	} else {
-		for key, value := range right {
-			left[key] = value
-		}
+		maps.Copy(left, right)
 	}
 	return left
 }

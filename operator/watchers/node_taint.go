@@ -9,10 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sTypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -72,6 +74,11 @@ func checkTaintForNextNodeItem(c kubernetes.Interface, nodeGetter slimNodeGetter
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	err := checkAndMarkNode(ctx, c, nodeGetter, key, mno, logger)
+	// Do not requeue on node not found errors
+	if err != nil && k8serrors.IsNotFound(err) {
+		workQueue.Forget(key)
+		return true
+	}
 	handleErr(err, key, workQueue, logger)
 	return true
 }
@@ -79,7 +86,7 @@ func checkTaintForNextNodeItem(c kubernetes.Interface, nodeGetter slimNodeGetter
 func handleErr(err error, key string, workQueue workqueue.TypedRateLimitingInterface[string], logger *slog.Logger) {
 	if err == nil {
 		if workQueue.NumRequeues(key) >= maxSilentRetries {
-			logger.Info("Successfully updated tains and conditions for the node", logfields.NodeName, key)
+			logger.Info("Successfully updated taints and conditions for the node", logfields.NodeName, key)
 		}
 		workQueue.Forget(key)
 		return
@@ -117,20 +124,20 @@ func checkAndMarkNode(ctx context.Context, c kubernetes.Interface, nodeGetter sl
 	if running {
 		if (options.RemoveNodeTaint && hasAgentNotReadyTaint(node)) ||
 			(options.SetCiliumIsUpCondition && !HasCiliumIsUpCondition(node)) {
-			logger.Info("Cilium pod running for node; marking accordingly", logfields.NodeName, node.GetName())
+			logger.InfoContext(ctx, "Cilium pod running for node; marking accordingly", logfields.NodeName, node.GetName())
 			return markNode(ctx, c, nodeGetter, node.GetName(), options, true, logger)
 		}
 	} else if scheduled { // Taint nodes where the pod is scheduled but not running
 		if options.SetNodeTaint && !hasAgentNotReadyTaint(node) {
-			logger.Info("Cilium pod scheduled but not running for node; setting taint", logfields.NodeName, node.GetName())
+			logger.InfoContext(ctx, "Cilium pod scheduled but not running for node; setting taint", logfields.NodeName, node.GetName())
 			return markNode(ctx, c, nodeGetter, node.GetName(), options, false, logger)
 		}
 	}
 	return nil
 }
 
-func ciliumPodHandler(obj interface{}, queue workqueue.TypedRateLimitingInterface[string], logger *slog.Logger) {
-	if pod := informer.CastInformerEvent[slim_corev1.Pod](obj); pod != nil {
+func ciliumPodHandler(obj any, queue workqueue.TypedRateLimitingInterface[string], logger *slog.Logger) {
+	if pod := informer.CastInformerEvent[slim_corev1.Pod](logger, obj); pod != nil {
 		nodeName := pod.Spec.NodeName
 		// Pod might not yet be scheduled to a node
 		if nodeName != "" {
@@ -152,10 +159,10 @@ func ciliumPodsWatcher(wg *sync.WaitGroup, slimClient slimclientset.Interface, q
 		&slim_corev1.Pod{},
 		0,
 		cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
+			AddFunc: func(obj any) {
 				ciliumPodHandler(obj, queue, logger)
 			},
-			UpdateFunc: func(_, newObj interface{}) {
+			UpdateFunc: func(_, newObj any) {
 				ciliumPodHandler(newObj, queue, logger)
 			},
 		},
@@ -206,7 +213,7 @@ func hasAgentNotReadyTaint(k8sNode *slim_corev1.Node) bool {
 }
 
 // hostNameIndexFunc index pods by node name.
-func hostNameIndexFunc(obj interface{}) ([]string, error) {
+func hostNameIndexFunc(obj any) ([]string, error) {
 	switch t := obj.(type) {
 	case *slim_corev1.Pod:
 		return []string{t.Spec.NodeName}, nil
@@ -214,7 +221,7 @@ func hostNameIndexFunc(obj interface{}) ([]string, error) {
 	return nil, fmt.Errorf("%w - found %T", errNoPod, obj)
 }
 
-func transformToCiliumPod(obj interface{}) (interface{}, error) {
+func transformToCiliumPod(obj any) (any, error) {
 	switch concreteObj := obj.(type) {
 	case *slim_corev1.Pod:
 		p := &slim_corev1.Pod{
@@ -291,10 +298,11 @@ func setNodeNetworkUnavailableFalse(ctx context.Context, c kubernetes.Interface,
 	if err != nil {
 		return err
 	}
-	patch := []byte(fmt.Sprintf(`{"status":{"conditions":%s}}`, raw))
+	patch := fmt.Appendf(nil, `{"status":{"conditions":%s}}`, raw)
 	_, err = c.CoreV1().Nodes().PatchStatus(ctx, nodeName, patch)
 	if err != nil {
-		logger.Info("Failed to patch node while setting condition",
+		logger.InfoContext(ctx,
+			"Failed to patch node while setting condition",
 			logfields.NodeName, nodeName,
 			logfields.Error, err,
 		)
@@ -337,13 +345,15 @@ func removeNodeTaint(ctx context.Context, c kubernetes.Interface, nodeGetter sli
 
 	// No cilium taints found
 	if !taintFound {
-		logger.Debug("Taint not found in node",
+		logger.DebugContext(ctx,
+			"Taint not found in node",
 			logfields.NodeName, nodeName,
 			logfields.Taint, pkgOption.Config.AgentNotReadyNodeTaintValue(),
 		)
 		return nil
 	}
-	logger.Debug("Removing Node Taint",
+	logger.DebugContext(ctx,
+		"Removing Node Taint",
 		logfields.NodeName, nodeName,
 		logfields.Taint, pkgOption.Config.AgentNotReadyNodeTaintValue(),
 	)
@@ -368,7 +378,8 @@ func removeNodeTaint(ctx context.Context, c kubernetes.Interface, nodeGetter sli
 
 	_, err = c.CoreV1().Nodes().Patch(ctx, nodeName, k8sTypes.JSONPatchType, patch, metav1.PatchOptions{})
 	if err != nil {
-		logger.Info("Failed to patch node while removing taint",
+		logger.InfoContext(ctx,
+			"Failed to patch node while removing taint",
 			logfields.NodeName, nodeName,
 			logfields.Error, err,
 		)
@@ -385,7 +396,7 @@ func setNodeTaint(ctx context.Context, c kubernetes.Interface, nodeGetter slimNo
 
 	taintFound := false
 
-	taints := append([]slim_corev1.Taint{}, k8sNode.Spec.Taints...)
+	taints := slices.Clone(k8sNode.Spec.Taints)
 	for _, taint := range k8sNode.Spec.Taints {
 		if taint.Key == pkgOption.Config.AgentNotReadyNodeTaintValue() {
 			taintFound = true
@@ -394,13 +405,15 @@ func setNodeTaint(ctx context.Context, c kubernetes.Interface, nodeGetter slimNo
 	}
 
 	if taintFound {
-		logger.Debug("Taint already set in node; skipping",
+		logger.DebugContext(ctx,
+			"Taint already set in node; skipping",
 			logfields.NodeName, nodeName,
 			logfields.Taint, pkgOption.Config.AgentNotReadyNodeTaintValue(),
 		)
 		return nil
 	}
-	logger.Debug("Setting Node Taint",
+	logger.DebugContext(ctx,
+		"Setting Node Taint",
 		logfields.NodeName, nodeName,
 		logfields.Taint, pkgOption.Config.AgentNotReadyNodeTaintValue(),
 	)
@@ -431,7 +444,8 @@ func setNodeTaint(ctx context.Context, c kubernetes.Interface, nodeGetter slimNo
 
 	_, err = c.CoreV1().Nodes().Patch(ctx, nodeName, k8sTypes.JSONPatchType, patch, metav1.PatchOptions{})
 	if err != nil {
-		logger.Info("Failed to patch node while adding taint",
+		logger.InfoContext(ctx,
+			"Failed to patch node while adding taint",
 			logfields.NodeName, nodeName,
 			logfields.Error, err,
 		)

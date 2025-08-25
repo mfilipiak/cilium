@@ -23,6 +23,7 @@ import (
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	"github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/labels"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
+	"github.com/cilium/cilium/pkg/loadbalancer"
 	ciliumslices "github.com/cilium/cilium/pkg/slices"
 )
 
@@ -40,7 +41,7 @@ type ServiceReconciler struct {
 // LBServiceReconcilerMetadata keeps a map of services to the respective advertised Paths
 type LBServiceReconcilerMetadata map[resource.Key][]*types.Path
 
-type localServices map[k8s.ServiceID]struct{}
+type localServices map[loadbalancer.ServiceName]struct{}
 
 // pathReference holds reference information about an advertised path
 type pathReference struct {
@@ -111,8 +112,8 @@ func (r *ServiceReconciler) getMetadata(sc *instance.ServerWithConfig) LBService
 
 func (r *ServiceReconciler) resolveSvcFromEndpoints(eps *k8s.Endpoints) (*slim_corev1.Service, bool, error) {
 	k := resource.Key{
-		Name:      eps.ServiceID.Name,
-		Namespace: eps.ServiceID.Namespace,
+		Name:      eps.ServiceName.Name(),
+		Namespace: eps.ServiceName.Namespace(),
 	}
 	return r.diffStore.GetByKey(k)
 }
@@ -154,10 +155,10 @@ endpointsLoop:
 			continue
 		}
 
-		svcID := eps.ServiceID
+		svcID := eps.ServiceName
 
 		for _, be := range eps.Backends {
-			if !be.Terminating && be.NodeName == localNodeName {
+			if !be.Conditions.IsTerminating() && be.NodeName == localNodeName {
 				// At least one endpoint is available on this node. We
 				// can make unavailable to available.
 				if _, found := ls[svcID]; !found {
@@ -172,7 +173,7 @@ endpointsLoop:
 }
 
 func hasLocalEndpoints(svc *slim_corev1.Service, ls localServices) bool {
-	_, found := ls[k8s.ServiceID{Name: svc.GetName(), Namespace: svc.GetNamespace()}]
+	_, found := ls[loadbalancer.NewServiceName(svc.GetNamespace(), svc.GetName())]
 	return found
 }
 
@@ -268,15 +269,13 @@ func (r *ServiceReconciler) diffReconciliationServiceList(sc *instance.ServerWit
 	// For externalTrafficPolicy=local, we need to take care of
 	// the endpoint changes in addition to the service changes.
 	// Take a diff of the endpoints and get affected services.
-	// We don't handle service deletion here since we only see
-	// the key, we cannot resolve associated service, so we have
-	// nothing to do.
-	epsUpserted, _, err := r.epDiffStore.Diff(r.diffID(sc.ASN))
+	// Also upsert services with deleted endpoints to handle potential withdrawal.
+	epsUpserted, epsDeleted, err := r.epDiffStore.Diff(r.diffID(sc.ASN))
 	if err != nil {
 		return nil, nil, fmt.Errorf("endpoints store diff: %w", err)
 	}
 
-	for _, eps := range epsUpserted {
+	for _, eps := range slices.Concat(epsUpserted, epsDeleted) {
 		svc, exists, err := r.resolveSvcFromEndpoints(eps)
 		if err != nil {
 			// Cannot resolve service from endpoints. We have nothing to do here.
@@ -307,7 +306,12 @@ func (r *ServiceReconciler) diffReconciliationServiceList(sc *instance.ServerWit
 		},
 	)
 
-	return deduped, deleted, nil
+	deletedKeys := make([]resource.Key, 0, len(deleted))
+	for _, svc := range deleted {
+		deletedKeys = append(deletedKeys, resource.Key{Name: svc.Name, Namespace: svc.Namespace})
+	}
+
+	return deduped, deletedKeys, nil
 }
 
 // svcDesiredRoutes determines which, if any routes should be announced for the given service. This determines the

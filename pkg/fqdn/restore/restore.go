@@ -10,16 +10,20 @@ package restore
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/netip"
-	"sort"
-	"testing"
+	"strconv"
 
 	"github.com/cilium/cilium/pkg/u8proto"
 )
 
 // PortProtoV2 is 1 value at bit position 24.
 const PortProtoV2 = 1 << 24
+
+// ErrRemoteClusterAddr is returned when trying to parse a non local
+// (i.e: not belonging to the local cluster) IP or CIDR.
+var ErrRemoteClusterAddr = errors.New("IP or CIDR from remote cluster")
 
 // PortProto is uint32 that encodes two different
 // versions of port protocol keys. Version 1 is protocol
@@ -130,7 +134,21 @@ func (ip RuleIPOrCIDR) MarshalText() ([]byte, error) {
 
 func (ip *RuleIPOrCIDR) UnmarshalText(b []byte) (err error) {
 	if b == nil {
-		return fmt.Errorf("cannot unmarshal nil into RuleIPOrCIDR")
+		return errors.New("cannot unmarshal nil into RuleIPOrCIDR")
+	}
+	if i := bytes.IndexByte(b, byte('@')); i >= 0 {
+		if i == len(b)-1 {
+			return errors.New("unexpected trailing @")
+		}
+		clusterIDStr := string(b[i+1:])
+		clusterID, err := strconv.ParseUint(clusterIDStr, 10, 32)
+		if err != nil {
+			return fmt.Errorf("unable to parse clusterID: %w", err)
+		}
+		if clusterID != 0 {
+			return ErrRemoteClusterAddr
+		}
+		b = b[:i]
 	}
 	if i := bytes.IndexByte(b, byte('/')); i < 0 {
 		var addr netip.Addr
@@ -149,34 +167,6 @@ func (ip *RuleIPOrCIDR) UnmarshalText(b []byte) (err error) {
 // RuleRegex is a wrapper for a pointer to a string so that we can define marshalers for it.
 type RuleRegex struct {
 	Pattern *string
-}
-
-// Sort is only used for testing
-// Sorts in place, but returns IPRules for convenience
-func (r IPRules) Sort(_ *testing.T) IPRules {
-	sort.SliceStable(r, func(i, j int) bool {
-		if r[i].Re.Pattern != nil && r[j].Re.Pattern != nil {
-			return *r[i].Re.Pattern < *r[j].Re.Pattern
-		}
-		if r[i].Re.Pattern != nil {
-			return true
-		}
-		return false
-	})
-
-	return r
-}
-
-// Sort is only used for testing
-// Sorts in place, but returns DNSRules for convenience
-func (r DNSRules) Sort(_ *testing.T) DNSRules {
-	for pp, ipRules := range r {
-		if len(ipRules) > 0 {
-			ipRules = ipRules.Sort(nil)
-			r[pp] = ipRules
-		}
-	}
-	return r
 }
 
 // UnmarshalText unmarshals json into a RuleRegex

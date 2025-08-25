@@ -73,7 +73,7 @@ type IPCacheEventSource interface {
 }
 
 func newNPHDSCache(logger *slog.Logger, ipcache IPCacheEventSource) NPHDSCache {
-	return NPHDSCache{Cache: xds.NewCache(), logger: logger, ipcache: ipcache}
+	return NPHDSCache{Cache: xds.NewCache(logger), logger: logger, ipcache: ipcache}
 }
 
 var observerOnce = sync.Once{}
@@ -161,11 +161,9 @@ func (cache *NPHDSCache) handleIPUpsert(npHost *envoyAPI.NetworkPolicyHosts, ide
 	} else {
 		// Resource already exists, create a copy of it and insert
 		// the new IP address into its HostAddresses list, if not already there.
-		for _, addr := range npHost.HostAddresses {
-			if addr == cidrStr {
-				// IP already exists, nothing to add
-				return nil
-			}
+		if slices.Contains(npHost.HostAddresses, cidrStr) {
+			// IP already exists, nothing to add
+			return nil
 		}
 		hostAddresses = make([]string, 0, len(npHost.HostAddresses)+1)
 		hostAddresses = append(hostAddresses, npHost.HostAddresses...)

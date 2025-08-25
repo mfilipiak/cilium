@@ -5,25 +5,23 @@ package endpointmanager
 
 import (
 	"context"
+	"log/slog"
 	"net/netip"
 	"sync"
 
 	"github.com/cilium/hive/cell"
 
+	"github.com/cilium/cilium/api/v1/models"
+	endpointapi "github.com/cilium/cilium/api/v1/server/restapi/endpoint"
 	"github.com/cilium/cilium/pkg/container/set"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	"github.com/cilium/cilium/pkg/identity"
-	"github.com/cilium/cilium/pkg/identity/cache"
-	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/k8s/client"
-	"github.com/cilium/cilium/pkg/maps/ctmap"
-	"github.com/cilium/cilium/pkg/maps/policymap"
 	"github.com/cilium/cilium/pkg/metrics"
+	monitoragent "github.com/cilium/cilium/pkg/monitor/agent"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
-	"github.com/cilium/cilium/pkg/policy"
-	"github.com/cilium/cilium/pkg/time"
 )
 
 // Cell provides the EndpointManager which maintains the collection of locally
@@ -36,7 +34,11 @@ var Cell = cell.Module(
 
 	cell.Config(defaultEndpointManagerConfig),
 	cell.Provide(newDefaultEndpointManager),
+	cell.Provide(endpoint.NewEndpointBuildQueue),
 	cell.ProvidePrivate(newEndpointSynchronizer),
+	cell.Invoke(
+		registerNamespaceUpdater,
+	),
 )
 
 type EndpointsLookup interface {
@@ -70,6 +72,9 @@ type EndpointsLookup interface {
 	// GetEndpoints returns a slice of all endpoints present in endpoint manager.
 	GetEndpoints() []*endpoint.Endpoint
 
+	// GetEndpointList returns a slice of all endpoint models.
+	GetEndpointList(params endpointapi.GetEndpointParams) []*models.Endpoint
+
 	// EndpointExists returns whether the endpoint with id exists.
 	EndpointExists(id uint16) bool
 
@@ -84,39 +89,11 @@ type EndpointsLookup interface {
 
 	// IngressEndpointExists returns true if the ingress endpoint exists.
 	IngressEndpointExists() bool
-
-	// GetEndpointNetnsCookieByIP returns the netns cookie for the passed endpoint with ip address if found.
-	GetEndpointNetnsCookieByIP(ip netip.Addr) (uint64, error)
 }
 
 type EndpointsModify interface {
 	// AddEndpoint takes the prepared endpoint object and starts managing it.
-	AddEndpoint(owner regeneration.Owner, ep *endpoint.Endpoint) (err error)
-
-	// AddIngressEndpoint creates an Endpoint representing Cilium Ingress on this node without a
-	// corresponding container necessarily existing. This is needed to be able to ingest and
-	// sync network policies applicable to Cilium Ingress to Envoy.
-	AddIngressEndpoint(
-		ctx context.Context,
-		owner regeneration.Owner,
-		policyMapFactory policymap.Factory,
-		policyGetter policyRepoGetter,
-		ipcache *ipcache.IPCache,
-		proxy endpoint.EndpointProxy,
-		allocator cache.IdentityAllocator,
-		ctMapGC ctmap.GCRunner,
-	) error
-
-	AddHostEndpoint(
-		ctx context.Context,
-		owner regeneration.Owner,
-		policyMapFactory policymap.Factory,
-		policyGetter policyRepoGetter,
-		ipcache *ipcache.IPCache,
-		proxy endpoint.EndpointProxy,
-		allocator cache.IdentityAllocator,
-		ctMapGC ctmap.GCRunner,
-	) error
+	AddEndpoint(ep *endpoint.Endpoint) (err error)
 
 	// RestoreEndpoint exposes the specified endpoint to other subsystems via the
 	// manager.
@@ -126,7 +103,7 @@ type EndpointsModify interface {
 	UpdateReferences(ep *endpoint.Endpoint) error
 
 	// RemoveEndpoint stops the active handling of events by the specified endpoint,
-	// and prevents the endpoint from being globally acccessible via other packages.
+	// and prevents the endpoint from being globally accessible via other packages.
 	RemoveEndpoint(ep *endpoint.Endpoint, conf endpoint.DeleteConfig) []error
 }
 
@@ -170,22 +147,6 @@ type EndpointManager interface {
 	// node's known labels.
 	InitHostEndpointLabels(ctx context.Context)
 
-	// GetPolicyEndpoints returns a map of all endpoints present in endpoint
-	// manager as policy.Endpoint interface set for the map key.
-	GetPolicyEndpoints() map[policy.Endpoint]struct{}
-
-	// HasGlobalCT returns true if the endpoints have a global CT, false otherwise.
-	HasGlobalCT() bool
-
-	// CallbackForEndpointsAtPolicyRev registers a callback on all endpoints that
-	// exist when invoked. It is similar to WaitForEndpointsAtPolicyRevision but
-	// each endpoint that reaches the desired revision calls 'done' independently.
-	// The provided callback should not block and generally be lightweight.
-	CallbackForEndpointsAtPolicyRev(ctx context.Context, rev uint64, done func(time.Time)) error
-
-	// GetEndpointNetnsCookieByIP returns the netns cookie for the passed endpoint with ip address if found.
-	GetEndpointNetnsCookieByIP(ip netip.Addr) (uint64, error)
-
 	// UpdatePolicy triggers policy updates for all live endpoints.
 	// Endpoints with security IDs in provided set will be regenerated. Otherwise, the endpoint's
 	// policy revision will be bumped to toRev.
@@ -208,6 +169,8 @@ var (
 type endpointManagerParams struct {
 	cell.In
 
+	Logger *slog.Logger
+
 	Lifecycle       cell.Lifecycle
 	Config          EndpointManagerConfig
 	Clientset       client.Clientset
@@ -215,20 +178,24 @@ type endpointManagerParams struct {
 	Health          cell.Health
 	EPSynchronizer  EndpointResourceSynchronizer
 	LocalNodeStore  *node.LocalNodeStore
+	MonitorAgent    monitoragent.Agent
 }
 
 type endpointManagerOut struct {
 	cell.Out
 
-	Lookup  EndpointsLookup
-	Modify  EndpointsModify
-	Manager EndpointManager
+	Lookup   EndpointsLookup
+	Modify   EndpointsModify
+	Manager  EndpointManager
+	Callback PolicyUpdateCallbackManager
 }
 
 func newDefaultEndpointManager(p endpointManagerParams) endpointManagerOut {
 	checker := endpoint.CheckHealth
 
-	mgr := New(p.EPSynchronizer, p.LocalNodeStore, p.Health)
+	p.Config.Validate(p.Logger)
+
+	mgr := New(p.Logger, p.MetricsRegistry, p.EPSynchronizer, p.LocalNodeStore, p.Health, p.MonitorAgent, p.Config)
 	if p.Config.EndpointGCInterval > 0 {
 		ctx, cancel := context.WithCancel(context.Background())
 		p.Lifecycle.Append(cell.Hook{
@@ -248,9 +215,10 @@ func newDefaultEndpointManager(p endpointManagerParams) endpointManagerOut {
 	mgr.InitMetrics(p.MetricsRegistry)
 
 	return endpointManagerOut{
-		Lookup:  mgr,
-		Modify:  mgr,
-		Manager: mgr,
+		Lookup:   mgr,
+		Modify:   mgr,
+		Manager:  mgr,
+		Callback: mgr,
 	}
 }
 

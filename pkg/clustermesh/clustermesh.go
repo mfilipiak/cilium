@@ -7,26 +7,25 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sync"
 
 	"github.com/cilium/hive/cell"
-	"github.com/sirupsen/logrus"
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/allocator"
 	"github.com/cilium/cilium/pkg/clustermesh/common"
+	serviceStore "github.com/cilium/cilium/pkg/clustermesh/store"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/clustermesh/wait"
 	"github.com/cilium/cilium/pkg/dial"
 	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/kvstore/store"
-	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	nodeStore "github.com/cilium/cilium/pkg/node/store"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
-	serviceStore "github.com/cilium/cilium/pkg/service/store"
 	"github.com/cilium/cilium/pkg/source"
 )
 
@@ -42,6 +41,9 @@ type Configuration struct {
 
 	// ClusterInfo is the id/name of the local cluster. This is used for logging and metrics
 	ClusterInfo cmtypes.ClusterInfo
+
+	// RemoteClientFactory is the factory to create new backend instances.
+	RemoteClientFactory common.RemoteClientFactoryFn
 
 	// ServiceMerger is the interface responsible to merge service and
 	// endpoints into an existing cache
@@ -62,6 +64,9 @@ type Configuration struct {
 	// ServiceResolver, if not nil, is used to create a custom dialer for service resolution.
 	ServiceResolver *dial.ServiceResolver
 
+	// ServiceBackendResolver, if not nil, is used to perform service to backend resolution.
+	ServiceBackendResolver *dial.ServiceBackendResolver
+
 	// IPCacheWatcherExtraOpts returns extra options for watching ipcache entries.
 	IPCacheWatcherExtraOpts IPCacheWatcherOptsFn `optional:"true"`
 
@@ -75,15 +80,7 @@ type Configuration struct {
 
 	FeatureMetrics ClusterMeshMetrics
 
-	Logger logrus.FieldLogger
-}
-
-// ServiceMerger is the interface to be implemented by the owner of local
-// services. The functions have to merge service updates and deletions with
-// local services to provide a shared view.
-type ServiceMerger interface {
-	MergeExternalServiceUpdate(service *serviceStore.ClusterService, swg *lock.StoppableWaitGroup)
-	MergeExternalServiceDelete(service *serviceStore.ClusterService, swg *lock.StoppableWaitGroup)
+	Logger *slog.Logger
 }
 
 // RemoteIdentityWatcher is any type which provides identities that have been
@@ -140,16 +137,28 @@ func NewClusterMesh(lifecycle cell.Lifecycle, c Configuration) *ClusterMesh {
 		conf:     c,
 		nodeName: nodeName,
 		globalServices: common.NewGlobalServiceCache(
+			c.Logger,
 			c.Metrics.TotalGlobalServices.WithLabelValues(c.ClusterInfo.Name, nodeName),
 		),
 		FeatureMetrics: c.FeatureMetrics,
 	}
 
 	cm.common = common.NewClusterMesh(common.Configuration{
+		Logger:                       c.Logger,
 		Config:                       c.Config,
 		ClusterInfo:                  c.ClusterInfo,
+		RemoteClientFactory:          c.RemoteClientFactory,
 		ClusterSizeDependantInterval: c.ClusterSizeDependantInterval,
-		ServiceResolver:              c.ServiceResolver,
+
+		Resolvers: func() (out []dial.Resolver) {
+			if c.ServiceResolver != nil {
+				out = append(out, c.ServiceResolver)
+			}
+			if c.ServiceBackendResolver != nil {
+				out = append(out, c.ServiceBackendResolver)
+			}
+			return out
+		}(),
 
 		NewRemoteCluster: cm.NewRemoteCluster,
 
@@ -171,7 +180,7 @@ func (cm *ClusterMesh) NewRemoteCluster(name string, status common.StatusFunc) c
 		storeFactory:             cm.conf.StoreFactory,
 		remoteIdentityWatcher:    cm.conf.RemoteIdentityWatcher,
 		synced:                   newSynced(),
-		log:                      cm.conf.Logger.WithField(logfields.ClusterName, name),
+		log:                      cm.conf.Logger.With(logfields.ClusterName, name),
 		featureMetrics:           cm.FeatureMetrics,
 		featureMetricMaxClusters: fmt.Sprintf("%d", cm.conf.ClusterInfo.MaxConnectedClusters),
 	}
@@ -197,17 +206,14 @@ func (cm *ClusterMesh) NewRemoteCluster(name string, status common.StatusFunc) c
 		common.NewSharedServicesObserver(
 			rc.log,
 			cm.globalServices,
-			func(svc *serviceStore.ClusterService) {
-				cm.conf.ServiceMerger.MergeExternalServiceUpdate(svc, rc.synced.services)
-			},
-			func(svc *serviceStore.ClusterService) {
-				cm.conf.ServiceMerger.MergeExternalServiceDelete(svc, rc.synced.services)
-			},
+			cm.conf.ServiceMerger.MergeExternalServiceUpdate,
+			cm.conf.ServiceMerger.MergeExternalServiceDelete,
 		),
-		store.RWSWithOnSyncCallback(func(ctx context.Context) { rc.synced.services.Stop() }),
+		store.RWSWithOnSyncCallback(func(ctx context.Context) { close(rc.synced.services) }),
 	)
 
 	rc.ipCacheWatcher = ipcache.NewIPIdentityWatcher(
+		cm.conf.Logger,
 		name, cm.conf.IPCache, cm.conf.StoreFactory, source.ClusterMesh,
 		store.RWSWithOnSyncCallback(func(ctx context.Context) { close(rc.synced.ipcache) }),
 	)
@@ -264,7 +270,7 @@ func (cm *ClusterMesh) synced(ctx context.Context, toWaitFn func(*remoteCluster)
 		// and continue normally, as if the synchronization completed successfully.
 		// This ensures that we don't block forever in case of misconfigurations.
 		cm.syncTimeoutLogOnce.Do(func() {
-			cm.conf.Logger.Warning("Failed waiting for clustermesh synchronization, expect possible disruption of cross-cluster connections")
+			cm.conf.Logger.Warn("Failed waiting for clustermesh synchronization, expect possible disruption of cross-cluster connections")
 		})
 
 		return nil

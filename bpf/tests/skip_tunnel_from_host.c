@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 /* Copyright Authors of Cilium */
-#include "common.h"
+
 #include <bpf/ctx/skb.h>
+#include "common.h"
 #include "pktgen.h"
 
 /*
@@ -11,13 +12,6 @@
 #define ENABLE_IPV4
 #define ENABLE_IPV6
 #define TUNNEL_MODE
-
-/*
- * Now include testing defaults
- */
-#define ROUTER_IP
-#undef ROUTER_IP
-#include "node_config.h"
 
 /*
  * Test Configuration Settings
@@ -113,7 +107,7 @@ setup(struct __ctx_buff *ctx, bool flag_skip_tunnel, bool v4)
 	key.reason = REASON_FORWARDED;
 	key.dir = METRIC_EGRESS;
 
-	map_delete_elem(&METRICS_MAP, &key);
+	map_delete_elem(&cilium_metrics, &key);
 
 	policy_add_egress_allow_all_entry();
 
@@ -169,7 +163,7 @@ check_ctx(const struct __ctx_buff *ctx, __u32 expected_result, bool v4)
 		key.reason = REASON_FORWARDED;
 		key.dir = METRIC_EGRESS;
 
-		entry = map_lookup_elem(&METRICS_MAP, &key);
+		entry = map_lookup_elem(&cilium_metrics, &key);
 		if (!entry)
 			test_fatal("metrics entry not found")
 

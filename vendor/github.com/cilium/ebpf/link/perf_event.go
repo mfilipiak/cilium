@@ -1,3 +1,5 @@
+//go:build !windows
+
 package link
 
 import (
@@ -132,7 +134,7 @@ func (pl *perfEventLink) PerfEvent() (*os.File, error) {
 		return nil, err
 	}
 
-	return fd.File("perf-event"), nil
+	return fd.File("perf-event")
 }
 
 func (pl *perfEventLink) Info() (*Info, error) {
@@ -197,6 +199,10 @@ func (pi *perfEventIoctl) Unpin() error {
 	return fmt.Errorf("perf event ioctl unpin: %w", ErrNotSupported)
 }
 
+func (pi *perfEventIoctl) Detach() error {
+	return fmt.Errorf("perf event ioctl detach: %w", ErrNotSupported)
+}
+
 func (pi *perfEventIoctl) Info() (*Info, error) {
 	return nil, fmt.Errorf("perf event ioctl info: %w", ErrNotSupported)
 }
@@ -209,7 +215,7 @@ func (pi *perfEventIoctl) PerfEvent() (*os.File, error) {
 		return nil, err
 	}
 
-	return fd.File("perf-event"), nil
+	return fd.File("perf-event")
 }
 
 // attach the given eBPF prog to the perf event stored in pe.

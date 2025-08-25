@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 /* Copyright Authors of Cilium */
 
-#include "common.h"
-
-#include "bpf/compiler.h"
 #include <bpf/ctx/skb.h>
+#include "common.h"
 #include "mock_skb_metadata.h"
 #include "pktgen.h"
 
@@ -31,7 +29,7 @@
 #define ENABLE_INTER_CLUSTER_SNAT
 
 /* Import map definitions and some default values */
-#include "node_config.h"
+#include <bpf/config/node.h>
 
 /* Overwrite the default port range defined in node_config.h
  * to have deterministic source port selection.

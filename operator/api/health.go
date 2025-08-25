@@ -17,14 +17,11 @@ import (
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/logging/logfields"
-	"github.com/cilium/cilium/pkg/option"
 )
 
-type kvstoreEnabledFunc func() bool
 type isOperatorLeadingFunc func() bool
 
 func HealthHandlerCell(
-	kvstoreEnabled kvstoreEnabledFunc,
 	isOperatorLeading isOperatorLeadingFunc,
 ) cell.Cell {
 	return cell.Module(
@@ -33,6 +30,7 @@ func HealthHandlerCell(
 
 		cell.Provide(func(
 			clientset k8sClient.Clientset,
+			kvstoreClient kvstore.Client,
 			logger *slog.Logger,
 		) operator.GetHealthzHandler {
 			if !clientset.IsEnabled() {
@@ -44,7 +42,7 @@ func HealthHandlerCell(
 			return &healthHandler{
 				enabled:           true,
 				isOperatorLeading: isOperatorLeading,
-				kvstoreEnabled:    kvstoreEnabled,
+				kvstoreClient:     kvstoreClient,
 				discovery:         clientset.Discovery(),
 				log:               logger,
 			}
@@ -55,7 +53,7 @@ func HealthHandlerCell(
 type healthHandler struct {
 	enabled           bool
 	isOperatorLeading isOperatorLeadingFunc
-	kvstoreEnabled    kvstoreEnabledFunc
+	kvstoreClient     kvstore.Client
 	discovery         discovery.DiscoveryInterface
 	log               *slog.Logger
 	consecutiveErrors atomic.Uint64
@@ -86,24 +84,9 @@ func (h *healthHandler) Handle(params operator.GetHealthzParams) middleware.Resp
 // checkStatus verifies the connection status to the kvstore and the
 // k8s apiserver and returns an error if any of them is unhealthy
 func (h *healthHandler) checkStatus() error {
-	// We check if we are the leader here because only the leader has
-	// access to the kvstore client. Otherwise, the kvstore client check
-	// will block. It is safe for a non-leader to skip this check, as the
-	// it is the leader's responsibility to report the status of the
-	// kvstore client.
-	if h.isOperatorLeading() && h.kvstoreEnabled() {
-		client := kvstore.Client()
-		if client == nil {
-			return errors.New("kvstore client not configured")
-		}
-
-		status := client.Status()
-		if status.State != models.StatusStateOk &&
-			// Don't treat warnings as errors when the support for running
-			// etcd in pod network is enabled. This is necessary to allow
-			// Cilium turning ready even before connecting to the kvstore,
-			// and break the chicken-and-egg dependency during startup.
-			!(status.State == models.StatusStateWarning && option.Config.KVstorePodNetworkSupport) {
+	if h.kvstoreClient.IsEnabled() {
+		status := h.kvstoreClient.Status()
+		if status.State != models.StatusStateOk {
 			return errors.New(status.Msg)
 		}
 	}

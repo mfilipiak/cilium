@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 /* Copyright Authors of Cilium */
 
-#include "common.h"
 #include <bpf/ctx/unspec.h>
-#include <bpf/api.h>
+#include "common.h"
 #include "pktgen.h"
 
 #define TEST_BPF_SOCK 1
@@ -12,8 +11,6 @@
 #define ENABLE_IPV6 1
 #undef ENABLE_HEALTH_CHECK
 #define ENABLE_LOCAL_REDIRECT_POLICY 1
-
-#define HAVE_NETNS_COOKIE 1
 
 #define BACKEND_PORT 7000
 #define NETNS_COOKIE 5000
@@ -80,7 +77,7 @@ int test_sock4_xlate_fwd_skip_lb(__maybe_unused struct xdp_md *ctx)
 			  v4_pod_one, tcp_dst_one, IPPROTO_TCP, 0);
 	lb_v4_add_backend(v4_svc_two, tcp_svc_two, 1, 124,
 			  v4_pod_one, tcp_dst_one, IPPROTO_TCP, 0);
-	ret = map_update_elem(&LB4_SKIP_MAP, &key, &val, BPF_ANY);
+	ret = map_update_elem(&cilium_skip_lb4, &key, &val, BPF_ANY);
 	/* Needed to avoid sock4_skip_xlate */
 	ipcache_v4_add_entry(v4_pod_one, 0, 112233, 0, 0);
 
@@ -152,7 +149,7 @@ int test_sock6_xlate_fwd_skip_lb(__maybe_unused struct xdp_md *ctx)
 	lb_v6_add_backend(&frontend_ip2, tcp_svc_two, 1, 124,
 			  (union v6addr *)V6_BACKEND1, tcp_dst_one, IPPROTO_TCP, 0);
 	memcpy(&key.address, (void *)V6_SVC_ONE, 16);
-	ret = map_update_elem(&LB6_SKIP_MAP, &key, &val, BPF_ANY);
+	ret = map_update_elem(&cilium_skip_lb6, &key, &val, BPF_ANY);
 	/* Needed to avoid sock6_skip_xlate */
 	ipcache_v6_add_entry((union v6addr *)V6_BACKEND1, 0, 112233, 0, 0);
 

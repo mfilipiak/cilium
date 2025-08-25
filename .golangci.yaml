@@ -1,228 +1,231 @@
-# options for analysis running
+version: "2"
 run:
-  # timeout for analysis, e.g. 30s, 5m, default is 1m
-  timeout: 20m
-
-  # exit code when at least one issue was found, default is 1
-  issues-exit-code: 1
-
-  # include test files or not, default is true
-  tests: true
-
-  # by default isn't set. If set we pass it to "go list -mod={option}". From "go help modules":
-  # If invoked with -mod=readonly, the go command is disallowed from the implicit
-  # automatic updating of go.mod described above. Instead, it fails when any changes
-  # to go.mod are needed. This setting is most useful to check that go.mod does
-  # not need updates, such as in a continuous integration and testing system.
-  # If invoked with -mod=vendor, the go command assumes that the vendor
-  # directory holds the correct copies of dependencies and ignores
-  # the dependency descriptions in go.mod.
   modules-download-mode: readonly
-
-# all available settings of specific linters
-linters-settings:
-  depguard:
-    rules:
-      main:
-        deny:
-          - pkg: "math/rand$"
-            desc: "Use math/rand/v2 instead"
-  exhaustruct:
-    # Ensure that command-line flags are explicitly default-initialized.
-    include:
-      - '.+\.[Cc]onfig'
-      - '.+[Cc]fg'
-    exclude:
-      - '.+cache\.Config' # k8s
-      - '.+fqdn\.Config' # internal API
-      - '.+tls\.Config' # Go TLS
-      - '.+v3\.Config' # etcd
-      - '.+translation\.Config' # internal gateway-api config
-  govet:
-    enable:
-      - nilness
-  goimports:
-    local-prefixes: github.com/cilium/cilium/
-  goheader:
-    values:
-      regexp:
-        PROJECT: 'Cilium|Hubble'
-    template: |-
-      SPDX-License-Identifier: Apache-2.0
-      Copyright Authors of {{ PROJECT }}
-  gosec:
-    includes:
-      - G402
-  gomodguard:
-    blocked:
-      modules:
-        - github.com/miekg/dns:
-            recommendations:
-              - github.com/cilium/dns
-            reason: "use the cilium fork directly to avoid replace directives in go.mod, see https://github.com/cilium/cilium/pull/27582"
-        - gopkg.in/check.v1:
-            recommendations:
-              - testing
-              - github.com/stretchr/testify/assert
-            reason: "gocheck has been deprecated, see https://github.com/cilium/cilium/issues/28596"
-        - github.com/cilium/checkmate:
-            recommendations:
-              - github.com/stretchr/testify/assert
-              - github.com/stretchr/testify/require
-            reason: "cilium/checkmate has been deprecated, see https://github.com/cilium/cilium/issues/28596"
-        - go.uber.org/multierr:
-            recommendations:
-              - errors
-            reason: "Go 1.20+ has support for combining multiple errors, see https://go.dev/doc/go1.20#errors"
-        - golang.org/x/exp/maps:
-            recommendations:
-              - maps
-              - slices
-            reason: "Go 1.23+ has support for maps and slices, see https://go.dev/doc/go1.23#iterators"
-        - golang.org/x/exp/constraints:
-            recommendations:
-              - cmp
-            reason: "Go 1.21+ has support for Ordered constraint, see https://go.dev/doc/go1.21#cmp"
-        - golang.org/x/exp/slices:
-            recommendations:
-              - slices
-            reason: "Go 1.21+ provides many common operations for slices using generic functions, see https://go.dev/doc/go1.21#slices"
-        - k8s.io/utils/pointer:
-            recommendations:
-              - k8s.io/utils/ptr
-            reason: "k8s.io/utils/pointer is deprecated, see https://pkg.go.dev/k8s.io/utils/pointer"
-
-  stylecheck:
-    checks: ["ST1019"]
-
-  sloglint:
-    # Enforce not mixing key-value pairs and attributes.
-    # https://github.com/go-simpler/sloglint?tab=readme-ov-file#no-mixed-arguments
-    # Default: true
-    no-mixed-args: true
-    # Enforce using key-value pairs only (overrides no-mixed-args, incompatible with attr-only).
-    # https://github.com/go-simpler/sloglint?tab=readme-ov-file#key-value-pairs-only
-    # Default: false
-    kv-only: true
-    # Enforce using attributes only (overrides no-mixed-args, incompatible with kv-only).
-    # https://github.com/go-simpler/sloglint?tab=readme-ov-file#attributes-only
-    # Default: false
-    attr-only: false
-    # Enforce not using global loggers.
-    # Values:
-    # - "": disabled
-    # - "all": report all global loggers
-    # - "default": report only the default slog logger
-    # https://github.com/go-simpler/sloglint?tab=readme-ov-file#no-global
-    # Default: ""
-    no-global: "default"
-    # Enforce using methods that accept a context.
-    # Values:
-    # - "": disabled
-    # - "all": report all contextless calls
-    # - "scope": report only if a context exists in the scope of the outermost function
-    # https://github.com/go-simpler/sloglint?tab=readme-ov-file#context-only
-    # Default: ""
-    context: ""
-    # Enforce using static values for log messages.
-    # https://github.com/go-simpler/sloglint?tab=readme-ov-file#static-messages
-    # Default: false
-    static-msg: false
-    # Enforce using constants instead of raw keys.
-    # https://github.com/go-simpler/sloglint?tab=readme-ov-file#no-raw-keys
-    # Default: false
-    no-raw-keys: true
-    # Enforce a single key naming convention.
-    # Values: snake, kebab, camel, pascal
-    # https://github.com/go-simpler/sloglint?tab=readme-ov-file#key-naming-convention
-    # Default: ""
-    key-naming-case: camel
-    # Enforce not using specific keys.
-    # https://github.com/go-simpler/sloglint?tab=readme-ov-file#forbidden-keys
-    # Default: []
-    forbidden-keys:
-      - time
-      - level
-      - msg
-      - source
-    # Enforce putting arguments on separate lines.
-    # https://github.com/go-simpler/sloglint?tab=readme-ov-file#arguments-on-separate-lines
-    # Default: false
-    args-on-sep-lines: true
-
-  testifylint:
-    enable-all: true
-    disable:  # TODO: remove each disabled rule and fix it
-      - float-compare
-      - go-require
-      - require-error
-
-issues:
-  exclude-dirs-use-default: true
-
-  # Excluding configuration per-path, per-linter, per-text and per-source
-  exclude-rules:
-    - linters: [staticcheck]
-      text: "SA1019"                  # this is rule for deprecated method
-    - linters: [staticcheck]
-      text: "SA9003: empty branch"
-    - linters: [staticcheck]
-      text: "SA2001: empty critical section"
-    - linters: [err113]
-      text: "do not define dynamic errors, use wrapped static errors instead" # This rule to avoid opinionated check fmt.Errorf("text")
-    # Skip goimports check on generated files
-    - path: \\.(generated\\.deepcopy|pb)\\.go$
-      linters:
-        - goimports
-    # Skip goheader check in the example files as these are included in the
-    # documentation.
-    - path: "contrib/examples/.+\\.go"
-      linters:
-        - goheader
-    # Skip goheader check on files imported and modified from upstream k8s
-    - path: "pkg/ipam/(cidrset|service)/.+\\.go"
-      linters:
-        - goheader
-    - path: "pkg/hubble/dropeventemitter/fake_recorder.go"
-      linters:
-        - goheader
-
-    - path: "tools/.*.go"
-      linters:
-        - sloglint
-
+  issues-exit-code: 1
+  tests: true
+  timeout: 60m
 linters:
-  disable-all: true
+  default: none
   enable:
     - depguard
-    - errorlint
     - err113
+    - errorlint
     - exhaustruct
-    - gofmt
-    - goimports
+    - forbidigo
+    - goheader
+    - gomodguard
+    - gosec
     - govet
     - ineffassign
     - misspell
     - sloglint
     - staticcheck
-    - stylecheck
     - testifylint
     - unused
-    - goheader
-    - gosec
-    - gomodguard
-    - gosimple
-
-# To enable later if makes sense
-#    - deadcode
-#    - errcheck
-#    - gocyclo
-#    - golint
-#    - gosec
-#    - gosimple
-#    - lll
-#    - maligned
-#    - misspell
-#    - prealloc
-#    - structcheck
-#    - typecheck
+  settings:
+    depguard:
+      rules:
+        main:
+          deny:
+            - pkg: math/rand$
+              desc: Use math/rand/v2 instead
+    exhaustruct:
+      include:
+        - .+\.[Cc]onfig
+        - .+[Cc]fg
+      exclude:
+        - .+cache\.Config
+        - .+fqdn\.Config
+        - .+tls\.Config
+        - .+v3\.Config
+        - .+translation\.Config
+    forbidigo:
+      forbid:
+        # List based on https://github.com/vishvananda/netlink/pull/1018
+        - pattern: ^netlink\.(Handle\.)?("AddrList|BridgeVlanList|ChainList|ClassList|ConntrackTableList|DevLinkGetDeviceList|DevLinkGetAllPortList|DevlinkGetDeviceParams|FilterList|FouList|GenlFamilyList|GTPPDPList|LinkByName|LinkByAlias|LinkList|LinkSubscribeWithOptions|NeighList|NeighProxyList|NeighListExecute|LinkGetProtinfo|QdiscList|RdmaLinkList|RdmaLinkByName|RdmaLinkDel|RouteList|RouteListFiltered|RouteListFilteredIter|RouteSubscribeWithOptions|RuleList|RuleListFiltered|SocketGet|SocketDiagTCPInfo|SocketDiagTCP|SocketDiagUDPInfo|SocketDiagUDP|UnixSocketDiagInfo|UnixSocketDiag|SocketXDPGetInfo|SocketDiagXDP|VDPAGetDevList|VDPAGetDevConfigList|VDPAGetMGMTDevList|XfrmPolicyList|XfrmStateList)
+          pkg: ^github.com/vishvananda/netlink$
+          msg: Found netlink function which can return ErrDumpInterrupted. Use safenetlink package instead.
+      analyze-types: true
+    goheader:
+      values:
+        regexp:
+          PROJECT: Cilium|Hubble
+      template: |-
+        SPDX-License-Identifier: Apache-2.0
+        Copyright Authors of {{ PROJECT }}
+    gomodguard:
+      blocked:
+        modules:
+          - github.com/miekg/dns:
+              recommendations:
+                - github.com/cilium/dns
+              reason: use the cilium fork directly to avoid replace directives in go.mod, see https://github.com/cilium/cilium/pull/27582
+          - go.uber.org/goleak:
+              recommendations:
+                - github.com/cilium/cilium/pkg/testutils
+              reason: Use testutils.Goleak* instead for the shared default options.
+          - gopkg.in/check.v1:
+              recommendations:
+                - testing
+                - github.com/stretchr/testify/assert
+              reason: gocheck has been deprecated, see https://github.com/cilium/cilium/issues/28596
+          - gopkg.in/yaml.v2:
+              recommendations:
+                - go.yaml.in/yaml/v2
+              reason: gopkg.in/yaml.v2 is deprecated, see https://github.com/yaml/go-yaml/discussions/11
+          - gopkg.in/yaml.v3:
+              recommendations:
+                - go.yaml.in/yaml/v3
+              reason: gopkg.in/yaml.v3 is deprecated, see https://github.com/yaml/go-yaml/discussions/11
+          - github.com/cilium/checkmate:
+              recommendations:
+                - github.com/stretchr/testify/assert
+                - github.com/stretchr/testify/require
+              reason: cilium/checkmate has been deprecated, see https://github.com/cilium/cilium/issues/28596
+          - github.com/sirupsen/logrus:
+              recommendations:
+                - log/slog
+              reason: Use the Go 1.21+ log/slog package for structured logging.
+          - go.uber.org/multierr:
+              recommendations:
+                - errors
+              reason: Go 1.20+ has support for combining multiple errors, see https://go.dev/doc/go1.20#errors
+          - golang.org/x/exp/maps:
+              recommendations:
+                - maps
+                - slices
+              reason: Go 1.23+ has support for maps and slices, see https://go.dev/doc/go1.23#iterators
+          - golang.org/x/exp/constraints:
+              recommendations:
+                - cmp
+              reason: Go 1.21+ has support for Ordered constraint, see https://go.dev/doc/go1.21#cmp
+          - golang.org/x/exp/slices:
+              recommendations:
+                - slices
+              reason: Go 1.21+ provides many common operations for slices using generic functions, see https://go.dev/doc/go1.21#slices
+          - k8s.io/utils/pointer:
+              recommendations:
+                - k8s.io/utils/ptr
+              reason: k8s.io/utils/pointer is deprecated, see https://pkg.go.dev/k8s.io/utils/pointer
+          - github.com/google/gopacket:
+              recommendations:
+                - github.com/gopacket/gopacket
+              reason: This package is better supported and gets regular updates, see https://github.com/cilium/cilium/issues/34536
+    gosec:
+      includes:
+        - G402
+    govet:
+      enable:
+        - nilness
+    sloglint:
+      no-mixed-args: true
+      kv-only: true
+      attr-only: false
+      no-global: default
+      context: ""
+      static-msg: false
+      no-raw-keys: true
+      key-naming-case: camel
+      forbidden-keys:
+        - time
+        - level
+        - msg
+        - source
+      args-on-sep-lines: true
+    staticcheck:
+      dot-import-whitelist:
+        - github.com/cilium/cilium/api/v1/health/server/restapi
+        - github.com/cilium/cilium/api/v1/health/server/restapi/connectivity
+        - github.com/cilium/cilium/api/v1/server/restapi/policy
+        - github.com/cilium/cilium/api/v1/server/restapi/endpoint
+        - github.com/cilium/cilium/test/ginkgo-ext
+        - github.com/onsi/gomega
+      checks:
+        # Default checks https://golangci-lint.run/usage/linters/#staticcheck
+        - all
+        - -ST1000
+        - -ST1003
+        - -ST1006
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        # Disable additional checks that are not applicable to Cilium. Enable them if needed in the future.
+        - -ST1005
+        - -ST1008
+        - -ST1019
+        - -QF1001
+        - -QF1002
+        - -QF1003
+        - -QF1006
+        - -QF1007
+        - -QF1008
+        - -QF1012
+    testifylint:
+      enable-all: true
+      disable: # TODO: remove each disabled rule and fix it
+        - float-compare
+        - go-require
+        - require-error
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - staticcheck
+        text: SA1019
+      - linters:
+          - staticcheck
+        text: "SA9003: empty branch"
+      - linters:
+          - staticcheck
+        text: "SA2001: empty critical section"
+      - linters:
+          - err113
+        text: do not define dynamic errors, use wrapped static errors instead
+      # Skip goheader check in the example files as these are included in the documentation
+      - linters:
+          - goheader
+          - goimports
+          - sloglint
+        path: contrib/examples/.+\.go
+      # Skip goheader check on files imported and modified from upstream k8s
+      - linters:
+          - goheader
+        path: pkg/ipam/(cidrset|service)/.+\.go
+      - linters:
+          - goheader
+        path: pkg/hubble/dropeventemitter/fake_recorder.go
+      - linters:
+          - sloglint
+        path: tools/.*.go
+      - linters:
+          - exhaustruct
+        path: .*_test\.go
+      - linters:
+          - gomodguard
+        path: test/
+        text: "logrus"
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/cilium/cilium/
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+      - \\.(generated\\.deepcopy|pb)\\.go$

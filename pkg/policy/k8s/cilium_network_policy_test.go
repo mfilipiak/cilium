@@ -6,15 +6,15 @@ package k8s
 import (
 	"testing"
 
-	"github.com/sirupsen/logrus"
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/cilium/cilium/pkg/k8s"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	k8sSynced "github.com/cilium/cilium/pkg/k8s/synced"
 	"github.com/cilium/cilium/pkg/k8s/types"
+	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy/api"
 	policytypes "github.com/cilium/cilium/pkg/policy/types"
@@ -59,19 +59,15 @@ func Test_GH33432(t *testing.T) {
 	cnpKey := resource.NewKey(cnp)
 	cnpResourceID := resourceIDForCiliumNetworkPolicy(cnpKey, cnp)
 
-	logger := logrus.New()
-	logger.SetLevel(logrus.DebugLevel)
-
 	p := &policyWatcher{
-		log:                logrus.NewEntry(logger),
+		log:                hivetest.Logger(t),
 		config:             &option.DaemonConfig{},
 		k8sResourceSynced:  &k8sSynced.Resources{CacheStatus: make(k8sSynced.CacheStatus)},
 		k8sAPIGroups:       &k8sSynced.APIGroups{},
 		policyImporter:     policyImporter,
-		svcCache:           fakeServiceCache{},
 		cnpCache:           map[resource.Key]*types.SlimCNP{},
 		toServicesPolicies: map[resource.Key]struct{}{},
-		cnpByServiceID:     map[k8s.ServiceID]map[resource.Key]struct{}{},
+		cnpByServiceID:     map[loadbalancer.ServiceName]map[resource.Key]struct{}{},
 		metricsManager:     NewCNPMetricsNoop(),
 	}
 

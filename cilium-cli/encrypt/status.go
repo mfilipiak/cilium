@@ -8,7 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -154,8 +155,7 @@ func nodeStatusFromText(str string) (models.EncryptionStatus, error) {
 			Interfaces: make([]*models.WireguardInterface, 0),
 		},
 	}
-	lines := strings.Split(str, "\n")
-	for _, line := range lines {
+	for line := range strings.SplitSeq(str, "\n") {
 		parts := strings.Split(line, ":")
 		if len(parts) < 2 {
 			continue
@@ -196,19 +196,26 @@ func nodeStatusFromText(str string) (models.EncryptionStatus, error) {
 func ipsecExpectedKeyCount(ciliumVersion semver.Version, cm *corev1.ConfigMap, nodeCount int) (int, error) {
 	fs := features.Set{}
 	fs.ExtractFromConfigMap(cm)
-	fs.ExtractFromVersionedConfigMap(ciliumVersion, cm)
+	fs.ExtractFromCiliumVersion(ciliumVersion)
 	if !fs[features.IPsecEnabled].Enabled {
 		return 0, nil
 	}
 
-	// We have two keys per node, per direction, per IP family.
-	expectedKeys := (nodeCount - 1) * 2
+	// For each IP family, we have two keys per remote node, per direction.
+	// For subnet-encryption mode (ENI & Azure), we'll have one additional
+	// key on ingress per remote node.
+	expectedKeys := nodeCount - 1
+	if fs[features.CiliumIPAMMode].Mode == "eni" || fs[features.CiliumIPAMMode].Mode == "azure" {
+		expectedKeys *= 3
+	} else {
+		expectedKeys *= 2
+	}
 	if fs[features.Tunnel].Enabled {
 		// If running in tunneling mode, then we have twice the amount of states
 		// and keys to handle encrypted overlay traffic.
 		expectedKeys *= 2
 	}
-	if fs[features.IPv6].Enabled {
+	if fs[features.IPv6].Enabled && fs[features.IPv4].Enabled {
 		// multiply by 2 because of dual stack: IPv4 & IPv6
 		expectedKeys *= 2
 	}
@@ -308,13 +315,7 @@ func printClusterStatus(cs clusterStatus, format string) error {
 	if cs.EncIPsecNodeCount > 0 {
 		builder.WriteString(fmt.Sprintf("Encryption: IPsec (%d/%d nodes)\n", cs.EncIPsecNodeCount, cs.TotalNodeCount))
 		if len(cs.IPsecKeysInUseNodeCount) > 0 {
-			keys := make([]int64, 0, len(cs.IPsecKeysInUseNodeCount))
-			for k := range cs.IPsecKeysInUseNodeCount {
-				keys = append(keys, k)
-			}
-			sort.Slice(keys, func(i, j int) bool {
-				return keys[i] < keys[j]
-			})
+			keys := slices.Sorted(maps.Keys(cs.IPsecKeysInUseNodeCount))
 			keyStrs := make([]string, 0, len(keys))
 			for _, k := range keys {
 				keyStrs = append(keyStrs, fmt.Sprintf("%d on %d/%d", k, cs.IPsecKeysInUseNodeCount[k], cs.TotalNodeCount))

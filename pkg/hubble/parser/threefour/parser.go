@@ -19,6 +19,7 @@ import (
 	"github.com/cilium/cilium/pkg/hubble/parser/common"
 	"github.com/cilium/cilium/pkg/hubble/parser/errors"
 	"github.com/cilium/cilium/pkg/hubble/parser/getters"
+	"github.com/cilium/cilium/pkg/hubble/parser/options"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/monitor"
 	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
@@ -35,7 +36,8 @@ type Parser struct {
 	serviceGetter  getters.ServiceGetter
 	linkGetter     getters.LinkGetter
 
-	epResolver *common.EndpointResolver
+	epResolver          *common.EndpointResolver
+	correlateL3L4Policy bool
 
 	// TODO: consider using a pool of these
 	packet *packet
@@ -44,8 +46,18 @@ type Parser struct {
 // re-usable packet to avoid reallocating gopacket datastructures
 type packet struct {
 	lock.Mutex
-	decLayer *gopacket.DecodingLayerParser
-	Layers   []gopacket.LayerType
+
+	decLayerL2Dev *gopacket.DecodingLayerParser
+	decLayerL3Dev struct {
+		IPv4 *gopacket.DecodingLayerParser
+		IPv6 *gopacket.DecodingLayerParser
+	}
+	decLayerOverlay struct {
+		VXLAN  *gopacket.DecodingLayerParser
+		Geneve *gopacket.DecodingLayerParser
+	}
+
+	Layers []gopacket.LayerType
 	layers.Ethernet
 	layers.IPv4
 	layers.IPv6
@@ -54,6 +66,20 @@ type packet struct {
 	layers.TCP
 	layers.UDP
 	layers.SCTP
+
+	overlay struct {
+		Layers []gopacket.LayerType
+		layers.VXLAN
+		layers.Geneve
+		layers.Ethernet
+		layers.IPv4
+		layers.IPv6
+		layers.ICMPv4
+		layers.ICMPv6
+		layers.TCP
+		layers.UDP
+		layers.SCTP
+	}
 }
 
 // New returns a new L3/L4 parser
@@ -65,28 +91,56 @@ func New(
 	ipGetter getters.IPGetter,
 	serviceGetter getters.ServiceGetter,
 	linkGetter getters.LinkGetter,
+	opts ...options.Option,
 ) (*Parser, error) {
 	packet := &packet{}
-	packet.decLayer = gopacket.NewDecodingLayerParser(
-		layers.LayerTypeEthernet, &packet.Ethernet,
+	decoders := []gopacket.DecodingLayer{
+		&packet.Ethernet,
 		&packet.IPv4, &packet.IPv6,
 		&packet.ICMPv4, &packet.ICMPv6,
-		&packet.TCP, &packet.UDP, &packet.SCTP)
+		&packet.TCP, &packet.UDP, &packet.SCTP,
+	}
+	packet.decLayerL2Dev = gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, decoders...)
+	packet.decLayerL3Dev.IPv4 = gopacket.NewDecodingLayerParser(layers.LayerTypeIPv4, decoders...)
+	packet.decLayerL3Dev.IPv6 = gopacket.NewDecodingLayerParser(layers.LayerTypeIPv6, decoders...)
+
+	overlayDecoders := []gopacket.DecodingLayer{
+		&packet.overlay.VXLAN, &packet.overlay.Geneve,
+		&packet.overlay.Ethernet,
+		&packet.overlay.IPv4, &packet.overlay.IPv6,
+		&packet.overlay.ICMPv4, &packet.overlay.ICMPv6,
+		&packet.overlay.TCP, &packet.overlay.UDP, &packet.overlay.SCTP,
+	}
+	packet.decLayerOverlay.VXLAN = gopacket.NewDecodingLayerParser(layers.LayerTypeVXLAN, overlayDecoders...)
+	packet.decLayerOverlay.Geneve = gopacket.NewDecodingLayerParser(layers.LayerTypeGeneve, overlayDecoders...)
 	// Let packet.decLayer.DecodeLayers return a nil error when it
 	// encounters a layer it doesn't have a parser for, instead of returning
 	// an UnsupportedLayerType error.
-	packet.decLayer.IgnoreUnsupported = true
+	packet.decLayerL2Dev.IgnoreUnsupported = true
+	packet.decLayerL3Dev.IPv4.IgnoreUnsupported = true
+	packet.decLayerL3Dev.IPv6.IgnoreUnsupported = true
+	packet.decLayerOverlay.VXLAN.IgnoreUnsupported = true
+	packet.decLayerOverlay.Geneve.IgnoreUnsupported = true
+
+	args := &options.Options{
+		EnableNetworkPolicyCorrelation: true,
+	}
+
+	for _, opt := range opts {
+		opt(args)
+	}
 
 	return &Parser{
-		log:            log,
-		dnsGetter:      dnsGetter,
-		endpointGetter: endpointGetter,
-		identityGetter: identityGetter,
-		ipGetter:       ipGetter,
-		serviceGetter:  serviceGetter,
-		linkGetter:     linkGetter,
-		epResolver:     common.NewEndpointResolver(log, endpointGetter, identityGetter, ipGetter),
-		packet:         packet,
+		log:                 log,
+		dnsGetter:           dnsGetter,
+		endpointGetter:      endpointGetter,
+		identityGetter:      identityGetter,
+		ipGetter:            ipGetter,
+		serviceGetter:       serviceGetter,
+		linkGetter:          linkGetter,
+		epResolver:          common.NewEndpointResolver(log, endpointGetter, identityGetter, ipGetter),
+		packet:              packet,
+		correlateL3L4Policy: args.EnableNetworkPolicyCorrelation,
 	}, nil
 }
 
@@ -109,14 +163,14 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 	switch eventType {
 	case monitorAPI.MessageTypeDrop:
 		dn = &monitor.DropNotify{}
-		if err := monitor.DecodeDropNotify(data, dn); err != nil {
+		if err := dn.Decode(data); err != nil {
 			return fmt.Errorf("failed to parse drop: %w", err)
 		}
 		eventSubType = dn.SubType
 		packetOffset = (int)(dn.DataOffset())
 	case monitorAPI.MessageTypeTrace:
 		tn = &monitor.TraceNotify{}
-		if err := monitor.DecodeTraceNotify(data, tn); err != nil {
+		if err := tn.Decode(data); err != nil {
 			return fmt.Errorf("failed to parse trace: %w", err)
 		}
 		eventSubType = tn.ObsPoint
@@ -132,7 +186,7 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 		packetOffset = (int)(tn.DataOffset())
 	case monitorAPI.MessageTypePolicyVerdict:
 		pvn = &monitor.PolicyVerdictNotify{}
-		if err := monitor.DecodePolicyVerdictNotify(data, pvn); err != nil {
+		if err := pvn.Decode(data); err != nil {
 			return fmt.Errorf("failed to parse policy verdict: %w", err)
 		}
 		eventSubType = pvn.SubType
@@ -140,7 +194,7 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 		authType = pb.AuthType(pvn.GetAuthType())
 	case monitorAPI.MessageTypeCapture:
 		dbg = &monitor.DebugCapture{}
-		if err := monitor.DecodeDebugCapture(data, dbg); err != nil {
+		if err := dbg.Decode(data); err != nil {
 			return fmt.Errorf("failed to parse debug capture: %w", err)
 		}
 		eventSubType = dbg.SubType
@@ -153,23 +207,15 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 		return fmt.Errorf("not enough bytes to decode %d", data)
 	}
 
-	p.packet.Lock()
-	defer p.packet.Unlock()
-
-	// Since v1.1.18, DecodeLayers returns a non-nil error for an empty packet, see
-	// https://github.com/google/gopacket/issues/846
-	// TODO: reconsider this check if the issue is fixed upstream
-	if len(data[packetOffset:]) > 0 {
-		err := p.packet.decLayer.DecodeLayers(data[packetOffset:], &p.packet.Layers)
-		if err != nil {
-			return err
-		}
-	} else {
-		// Truncate layers to avoid accidental re-use.
-		p.packet.Layers = p.packet.Layers[:0]
+	isL3Device := tn != nil && tn.IsL3Device() || dn != nil && dn.IsL3Device()
+	isIPv6 := tn != nil && tn.IsIPv6() || dn != nil && dn.IsIPv6()
+	isVXLAN := tn != nil && tn.IsVXLAN() || dn != nil && dn.IsVXLAN()
+	isGeneve := tn != nil && tn.IsGeneve() || dn != nil && dn.IsGeneve()
+	ether, ip, l4, tunnel, srcIP, dstIP, srcPort, dstPort, summary, err := decodeLayers(data[packetOffset:], p.packet, isL3Device, isIPv6, isVXLAN, isGeneve)
+	if err != nil {
+		return err
 	}
 
-	ether, ip, l4, srcIP, dstIP, srcPort, dstPort, summary := decodeLayers(p.packet)
 	if tn != nil && ip != nil {
 		if !tn.OriginalIP().IsUnspecified() {
 			// Ignore invalid IP - getters will handle invalid value.
@@ -212,6 +258,7 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 	decoded.Ethernet = ether
 	decoded.IP = ip
 	decoded.L4 = l4
+	decoded.Tunnel = tunnel
 	decoded.Source = srcEndpoint
 	decoded.Destination = dstEndpoint
 	decoded.Type = pb.FlowType_L3_L4
@@ -231,8 +278,8 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 	decoded.ProxyPort = decodeProxyPort(dbg, tn)
 	decoded.Summary = summary
 
-	if p.endpointGetter != nil {
-		correlation.CorrelatePolicy(p.endpointGetter, decoded)
+	if p.correlateL3L4Policy && p.endpointGetter != nil {
+		correlation.CorrelatePolicy(p.log, p.endpointGetter, decoded)
 	}
 
 	return nil
@@ -246,13 +293,42 @@ func (p *Parser) resolveNames(epID uint32, ip netip.Addr) (names []string) {
 	return nil
 }
 
-func decodeLayers(packet *packet) (
+func decodeLayers(payload []byte, packet *packet, isL3Device, isIPv6, isVXLAN, isGeneve bool) (
 	ethernet *pb.Ethernet,
 	ip *pb.IP,
 	l4 *pb.Layer4,
+	tunnel *pb.Tunnel,
 	sourceIP, destinationIP netip.Addr,
 	sourcePort, destinationPort uint16,
-	summary string) {
+	summary string,
+	err error,
+) {
+	packet.Lock()
+	defer packet.Unlock()
+
+	// Since v1.1.18, DecodeLayers returns a non-nil error for an empty packet, see
+	// https://github.com/google/gopacket/issues/846
+	// TODO: reconsider this check if the issue is fixed upstream
+	if len(payload) == 0 {
+		// Truncate layers to avoid accidental re-use.
+		packet.Layers = packet.Layers[:0]
+		packet.overlay.Layers = packet.overlay.Layers[:0]
+		return
+	}
+
+	switch {
+	case !isL3Device:
+		err = packet.decLayerL2Dev.DecodeLayers(payload, &packet.Layers)
+	case isIPv6:
+		err = packet.decLayerL3Dev.IPv6.DecodeLayers(payload, &packet.Layers)
+	default:
+		err = packet.decLayerL3Dev.IPv4.DecodeLayers(payload, &packet.Layers)
+	}
+
+	if err != nil {
+		return
+	}
+
 	for _, typ := range packet.Layers {
 		summary = typ.String()
 		switch typ {
@@ -275,6 +351,74 @@ func decodeLayers(packet *packet) (
 		case layers.LayerTypeICMPv6:
 			l4 = decodeICMPv6(&packet.ICMPv6)
 			summary = "ICMPv6 " + packet.ICMPv6.TypeCode.String()
+		}
+	}
+
+	switch {
+	case isVXLAN:
+		err = packet.decLayerOverlay.VXLAN.DecodeLayers(packet.UDP.Payload, &packet.overlay.Layers)
+	case isGeneve:
+		err = packet.decLayerOverlay.Geneve.DecodeLayers(packet.UDP.Payload, &packet.overlay.Layers)
+	default:
+		// Truncate layers to avoid accidental re-use.
+		packet.overlay.Layers = packet.overlay.Layers[:0]
+		return
+	}
+
+	if err != nil {
+		err = fmt.Errorf("overlay: %w", err)
+		return
+	}
+
+	// Return in case we have not decoded any overlay layer.
+	if len(packet.overlay.Layers) == 0 {
+		return
+	}
+
+	// Expect VXLAN/Geneve overlay as first overlay layer, if not we bail out.
+	switch packet.overlay.Layers[0] {
+	case layers.LayerTypeVXLAN:
+		tunnel = &pb.Tunnel{Protocol: pb.Tunnel_VXLAN, IP: ip, L4: l4}
+	case layers.LayerTypeGeneve:
+		tunnel = &pb.Tunnel{Protocol: pb.Tunnel_GENEVE, IP: ip, L4: l4}
+	default:
+		return
+	}
+
+	// Reset return values. This ensures the resulting flow does not misrepresent
+	// what is happening (e.g. same IP addresses for overlay and underlay).
+	ethernet, ip, l4 = nil, nil, nil
+	sourceIP, destinationIP = netip.Addr{}, netip.Addr{}
+	sourcePort, destinationPort = 0, 0
+	summary = ""
+
+	// Parse the rest of the overlay layers as we would do for a non-encapsulated packet.
+	// It is possible we're not parsing any layer here. This is because the overlay
+	// decoders failed (e.g., not enough data). We would still return empty values
+	// for the inner packet (ethernet, ip, l4, basically the re-init variables)
+	// while returning the non-empty `tunnel` field.
+	for _, typ := range packet.overlay.Layers[1:] {
+		summary = typ.String()
+		switch typ {
+		case layers.LayerTypeEthernet:
+			ethernet = decodeEthernet(&packet.overlay.Ethernet)
+		case layers.LayerTypeIPv4:
+			ip, sourceIP, destinationIP = decodeIPv4(&packet.overlay.IPv4)
+		case layers.LayerTypeIPv6:
+			ip, sourceIP, destinationIP = decodeIPv6(&packet.overlay.IPv6)
+		case layers.LayerTypeTCP:
+			l4, sourcePort, destinationPort = decodeTCP(&packet.overlay.TCP)
+			summary = "TCP Flags: " + getTCPFlags(packet.overlay.TCP)
+		case layers.LayerTypeUDP:
+			l4, sourcePort, destinationPort = decodeUDP(&packet.overlay.UDP)
+		case layers.LayerTypeSCTP:
+			l4, sourcePort, destinationPort = decodeSCTP(&packet.overlay.SCTP)
+		case layers.LayerTypeICMPv4:
+			l4 = decodeICMPv4(&packet.overlay.ICMPv4)
+			summary = "ICMPv4 " + packet.overlay.ICMPv4.TypeCode.String()
+		case layers.LayerTypeICMPv6:
+			l4 = decodeICMPv6(&packet.overlay.ICMPv6)
+			summary = "ICMPv6 " + packet.overlay.ICMPv6.TypeCode.String()
 		}
 	}
 

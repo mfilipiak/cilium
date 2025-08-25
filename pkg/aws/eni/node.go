@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/netip"
 	"slices"
 	"strings"
@@ -19,9 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/smithy-go"
 
-	operatorOption "github.com/cilium/cilium/operator/option"
 	"github.com/cilium/cilium/pkg/aws/ec2"
-	"github.com/cilium/cilium/pkg/aws/eni/limits"
 	eniTypes "github.com/cilium/cilium/pkg/aws/eni/types"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/ip"
@@ -132,7 +131,13 @@ func (n *Node) getLimits() (ipamTypes.Limits, bool) {
 // getLimitsLocked is the same function as getLimits, but assumes the n.mutex
 // is read locked.
 func (n *Node) getLimitsLocked() (ipamTypes.Limits, bool) {
-	return limits.Get(n.k8sObj.Spec.ENI.InstanceType)
+	limit, ok := n.manager.limitsGetter.Get(n.k8sObj.Spec.ENI.InstanceType)
+	if !ok {
+		n.logger.Load().Debug("Instance type not found in limits packages",
+			logfields.InstanceType, n.k8sObj.Spec.ENI.InstanceType,
+		)
+	}
+	return limit, ok
 }
 
 // PrepareIPRelease prepares the release of ENI IPs.
@@ -142,20 +147,91 @@ func (n *Node) PrepareIPRelease(excessIPs int, scopedLog *slog.Logger) *ipam.Rel
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
 
-	// Needed for selecting the same ENI to release IPs from
-	// when more than one ENI qualifies for release
-	eniIds := make([]string, 0, len(n.enis))
-	for k := range n.enis {
-		eniIds = append(eniIds, k)
-	}
-	slices.Sort(eniIds)
+	// Needs to be sorted for selecting the same ENI to release IPs from
+	// when more than one ENI qualifies for release.
 	// Iterate over ENIs on this node, select the ENI with the most
 	// addresses available for release
-	for _, eniId := range eniIds {
+	for _, eniId := range slices.Sorted(maps.Keys(n.enis)) {
 		e := n.enis[eniId]
 
-		// IP release for prefixes is not currently supported. Will skip releasing from this ENI
-		if len(e.Prefixes) > 0 {
+		// Ignore if the ENI is not managed by Cilium
+		if e.IsExcludedBySpec(n.k8sObj.Spec.ENI) {
+			continue
+		}
+		ipPrefixes := e.Prefixes
+		ipsOnENI := e.Addresses
+		usedIPs := n.k8sObj.Status.IPAM.Used
+
+		matchedIPs := []string{}
+		// Returns the first ENI with either IPPrefixes/secondary IPs to release instead of
+		// looking for an ENI with max IPPrefixes/secondary IPs to release for faster and
+		// lower latency when early ENIs are eligible.
+		if len(ipPrefixes) > 0 {
+			scopedLog.Debug(
+				"Considering ENI for IPPrefix release",
+				fieldEniID, e.ID,
+				logfields.NeedIndex, *n.k8sObj.Spec.ENI.FirstInterfaceIndex,
+				logfields.Index, e.Number,
+				logfields.NumAddresses, len(e.Addresses),
+				logfields.LenPrefixes, len(ipPrefixes),
+				logfields.ExcessIPs, excessIPs,
+			)
+
+			unusedIPPrefixes := []string{}
+			if excessIPs >= option.ENIPDBlockSizeIPv4 {
+				// Identify unused IP prefixes to release
+				for _, prefix := range ipPrefixes {
+					prefixAddr, err := netip.ParsePrefix(prefix)
+					if err != nil {
+						continue
+					}
+
+					found := false
+					for ip := range usedIPs {
+						if prefixAddr.Contains(netip.MustParseAddr(ip)) {
+							found = true
+							break
+						}
+					}
+					if !found {
+						unusedIPPrefixes = append(unusedIPPrefixes, prefix)
+						for _, ipStr := range e.Addresses {
+							ip := netip.MustParseAddr(ipStr)
+							if prefixAddr.Contains(ip) {
+								matchedIPs = append(matchedIPs, ipStr)
+							}
+						}
+						// Reduce excessIPs with option.ENIPDBlockSizeIPv4 number of IPs after adding a prefix
+						excessIPs = excessIPs - option.ENIPDBlockSizeIPv4
+					}
+
+					if excessIPs < option.ENIPDBlockSizeIPv4 {
+						break
+					}
+				}
+			}
+
+			secondaryIPs := getIndividualIPs(ipPrefixes, e.Addresses)
+			if len(unusedIPPrefixes) > 0 || len(secondaryIPs) > 0 {
+				r.InterfaceID = eniId
+				r.PoolID = ipamTypes.PoolID(e.Subnet.ID)
+				r.IPPrefixesToRelease = unusedIPPrefixes
+				if len(secondaryIPs) > 0 {
+					secondaryIPs = getUnusedIPs(usedIPs, secondaryIPs, e.IP)
+					maxReleaseOnENI := min(excessIPs, len(secondaryIPs))
+					matchedIPs = append(matchedIPs, secondaryIPs[:maxReleaseOnENI]...)
+				}
+				scopedLog.Debug(
+					"ENI has unused secondary IPs and/or IPPrefixes that can be released",
+					fieldEniID, e.ID,
+					logfields.Prefix, unusedIPPrefixes,
+					logfields.IPAddrs, matchedIPs,
+				)
+				r.IPsToRelease = matchedIPs
+				// Return since we have either IPPrefixes/secondary IPs to release
+				return r
+			}
+			// Look for next ENI if we do not have an ENI with either a Prefix/secondary IP to release
 			continue
 		}
 		scopedLog.Debug(
@@ -166,22 +242,9 @@ func (n *Node) PrepareIPRelease(excessIPs int, scopedLog *slog.Logger) *ipam.Rel
 			logfields.NumAddresses, len(e.Addresses),
 		)
 
-		if e.IsExcludedBySpec(n.k8sObj.Spec.ENI) {
-			continue
-		}
-
 		// Count free IP addresses on this ENI
-		ipsOnENI := n.k8sObj.Status.ENI.ENIs[e.ID].Addresses
-		freeIpsOnENI := []string{}
-		for _, ip := range ipsOnENI {
-			_, ipUsed := n.k8sObj.Status.IPAM.Used[ip]
-			// exclude primary IPs
-			if !ipUsed && ip != e.IP {
-				freeIpsOnENI = append(freeIpsOnENI, ip)
-			}
-		}
+		freeIpsOnENI := getUnusedIPs(usedIPs, ipsOnENI, e.IP)
 		freeOnENICount := len(freeIpsOnENI)
-
 		if freeOnENICount <= 0 {
 			continue
 		}
@@ -193,7 +256,6 @@ func (n *Node) PrepareIPRelease(excessIPs int, scopedLog *slog.Logger) *ipam.Rel
 			logfields.FreeOnENICount, freeOnENICount,
 		)
 		maxReleaseOnENI := min(freeOnENICount, excessIPs)
-
 		firstENIWithFreeIPFound := r.IPsToRelease == nil
 		eniWithMoreFreeIPsFound := maxReleaseOnENI > len(r.IPsToRelease)
 		// Select the ENI with the most addresses available for release
@@ -203,12 +265,62 @@ func (n *Node) PrepareIPRelease(excessIPs int, scopedLog *slog.Logger) *ipam.Rel
 			r.IPsToRelease = freeIpsOnENI[:maxReleaseOnENI]
 		}
 	}
-
 	return r
+}
+
+// ReleaseIPPrefixes performs the ENI IPPrefixes release operation
+func (n *Node) ReleaseIPPrefixes(ctx context.Context, r *ipam.ReleaseAction) error {
+	if err := n.manager.api.UnassignENIPrefixes(ctx, r.InterfaceID, r.IPPrefixesToRelease); err != nil {
+		return err
+	}
+
+	return nil
+
+}
+
+// Get Unused Individual IPs
+func getUnusedIPs(usedIPs ipamTypes.AllocationMap, ipAddresses []string, primaryIP string) (unusedIPs []string) {
+	for _, ipStr := range ipAddresses {
+		_, usedIP := usedIPs[ipStr]
+		if !usedIP && ipStr != primaryIP {
+			unusedIPs = append(unusedIPs, ipStr)
+		}
+	}
+	return unusedIPs
+}
+
+// Get Individual IPs that do not belong to any IPPrefix
+func getIndividualIPs(ipPrefixes, ipAddresses []string) (individualIPs []string) {
+	for _, ipStr := range ipAddresses {
+		matched := false
+		ip := netip.MustParseAddr(ipStr)
+		for _, prefix := range ipPrefixes {
+			prefixAddr, err := netip.ParsePrefix(prefix)
+			if err != nil {
+				continue
+			}
+			if prefixAddr.Contains(ip) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			individualIPs = append(individualIPs, ipStr)
+		}
+	}
+	return individualIPs
 }
 
 // ReleaseIPs performs the ENI IP release operation
 func (n *Node) ReleaseIPs(ctx context.Context, r *ipam.ReleaseAction) error {
+	// Filter IPs that do not belong to any IPPrefix
+	if len(r.IPPrefixesToRelease) > 0 {
+		r.IPsToRelease = getIndividualIPs(r.IPPrefixesToRelease, r.IPsToRelease)
+	}
+
+	if len(r.IPsToRelease) <= 0 {
+		return nil
+	}
 	if err := n.manager.api.UnassignPrivateIpAddresses(ctx, r.InterfaceID, r.IPsToRelease); err != nil {
 		return err
 	}
@@ -293,7 +405,7 @@ func isSubnetAtPrefixCapacity(err error) bool {
 	return false
 }
 
-// AllocateIPs performs the ENI allocation oepration
+// AllocateIPs performs the ENI allocation operation
 func (n *Node) AllocateIPs(ctx context.Context, a *ipam.AllocationAction) error {
 	// Check if the interface to allocate on is prefix delegated
 	n.mutex.RLock()
@@ -322,7 +434,15 @@ func (n *Node) AllocateIPs(ctx context.Context, a *ipam.AllocationAction) error 
 }
 
 func (n *Node) AllocateStaticIP(ctx context.Context, staticIPTags ipamTypes.Tags) (string, error) {
-	return n.manager.api.AssociateEIP(ctx, n.node.InstanceID(), staticIPTags)
+	n.mutex.RLock()
+	defer n.mutex.RUnlock()
+	for _, eni := range n.enis {
+		if eni.PublicIP == "" {
+			return n.manager.api.AssociateEIP(ctx, eni.ID, staticIPTags)
+		}
+	}
+
+	return "", fmt.Errorf("no ENI found to associate static IP")
 }
 
 func (n *Node) getSecurityGroupIDs(ctx context.Context, eniSpec eniTypes.ENISpec) ([]string, error) {
@@ -347,6 +467,7 @@ func (n *Node) getSecurityGroupIDs(ctx context.Context, eniSpec eniTypes.ENISpec
 			for _, secGroup := range securityGroups {
 				groups = append(groups, secGroup.ID)
 			}
+			slices.Sort(groups)
 			return groups, nil
 		}
 	}
@@ -366,6 +487,8 @@ func (n *Node) getSecurityGroupIDs(ctx context.Context, eniSpec eniTypes.ENISpec
 	if securityGroups == nil {
 		return nil, errors.New("failed to get security group ids")
 	}
+
+	slices.Sort(securityGroups)
 
 	return securityGroups, nil
 }
@@ -506,12 +629,12 @@ func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationA
 
 	scopedLog.Info("Created new ENI", fieldEniID, eniID)
 
-	if subnet.CIDR != nil {
+	if subnet.CIDR.IsValid() {
 		eni.Subnet.CIDR = subnet.CIDR.String()
 	}
 
 	var attachmentID string
-	for attachRetries := 0; attachRetries < maxAttachRetries; attachRetries++ {
+	for range maxAttachRetries {
 		attachmentID, err = n.manager.api.AttachNetworkInterface(ctx, index, n.node.InstanceID(), eniID)
 
 		// The index is already in use, this can happen if the local
@@ -651,7 +774,6 @@ func (n *Node) ResyncInterfacesAndIPs(ctx context.Context, scopedLog *slog.Logge
 
 	// An ec2 instance has at least one ENI attached, no ENI found implies instance not found.
 	if enis == 0 {
-		scopedLog.Warn("Instance not found! Please delete corresponding ciliumnode if instance has already been deleted.")
 		return nil, stats, fmt.Errorf("unable to retrieve ENIs")
 	}
 
@@ -747,20 +869,11 @@ func (n *Node) GetMinimumAllocatableIPv4() int {
 	if !limitsAvailable {
 		adviseOperatorFlagOnce.Do(func() {
 			n.logger.Load().Warn(
-				fmt.Sprintf(
-					"Unable to find limits for instance type, consider setting --%s=true on the Operator",
-					operatorOption.UpdateEC2AdapterLimitViaAPI,
-				),
+				"Unable to find limits for instance type",
 				logfields.InstanceType, n.k8sObj.Spec.ENI.InstanceType,
 			)
 		})
 
-		n.logger.Load().Warn(
-			"Could not determine instance limits, falling back to default pre-allocate value",
-			logfields.AdaptersLimit, "unknown",
-			logfields.FirstInterfaceIndex, index,
-			logfields.PreAllocate, minimum,
-		)
 		return minimum
 	}
 
@@ -795,8 +908,8 @@ func (n *Node) IsPrefixDelegated() bool {
 	if !limitsAvailable {
 		return false
 	}
-	// Allocating prefixes is supported only on nitro instances
-	if limits.HypervisorType != "nitro" {
+	// Allocating prefixes is supported only on nitro and bare metal instances
+	if limits.HypervisorType != "nitro" && !limits.IsBareMetal {
 		return false
 	}
 	// Check if this node is allowed to use prefix delegation
@@ -818,58 +931,6 @@ func (n *Node) IsPrefixDelegated() bool {
 		}
 	}
 	return true
-}
-
-// GetUsedIPWithPrefixes returns the total number of used IPs on the node including the prefixes allocated.
-// A prefix is considered as used if there is at least one allocated IP from that prefix. All IPs from a used prefix
-// are included in the count returned.
-func (n *Node) GetUsedIPWithPrefixes() int {
-	var usedIps int
-	eniPrefixes := make(map[string][]netip.Prefix)
-
-	// Populate ENI -> Prefix mapping
-	for eniName, eni := range n.k8sObj.Status.ENI.ENIs {
-		var prefixes []netip.Prefix
-		for _, pfx := range eni.Prefixes {
-			ipNet, err := netip.ParsePrefix(pfx)
-			if err != nil {
-				continue
-			}
-			prefixes = append(prefixes, ipNet)
-		}
-		eniPrefixes[eniName] = prefixes
-	}
-	usedPfx := make(map[netip.Prefix]bool)
-	for ip, resource := range n.k8sObj.Status.IPAM.Used {
-		// Fetch prefixes on this IP's ENI
-		prefixNetworks, exists := eniPrefixes[resource.Resource]
-		if !exists {
-			continue
-		}
-		var prefixBased bool
-		var pfx netip.Prefix
-		addr, err := netip.ParseAddr(ip)
-		if err != nil {
-			continue
-		}
-		// Check if the IP is from any of the prefixes attached to this ENI
-		for _, ipNet := range prefixNetworks {
-			if ipNet.Contains(addr) {
-				prefixBased = true
-				pfx = ipNet
-				break
-			}
-		}
-		if prefixBased {
-			if !usedPfx[pfx] {
-				usedIps = usedIps + option.ENIPDBlockSizeIPv4
-				usedPfx[pfx] = true
-			}
-		} else {
-			usedIps++
-		}
-	}
-	return usedIps
 }
 
 // getEffectiveIPLimits computing the effective number of available addresses on the ENI

@@ -7,26 +7,34 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/job"
-	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrlRuntime "sigs.k8s.io/controller-runtime"
-	mcsapicontrollers "sigs.k8s.io/mcs-api/controllers"
 	mcsapiv1alpha1 "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
 
 	"github.com/cilium/cilium/pkg/clustermesh/operator"
 	"github.com/cilium/cilium/pkg/clustermesh/types"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/metrics"
 )
 
 var Cell = cell.Module(
 	"mcsapi",
 	"Multi-Cluster Services API",
 	cell.Invoke(registerMCSAPIController),
+)
+
+var ServiceExportSyncCell = cell.Module(
+	"service-export-sync",
+	"Synchronizes Kubernetes ServiceExports to KVStore",
+
+	cell.Invoke(registerServiceExportSync),
 )
 
 type mcsAPIParams struct {
@@ -43,8 +51,9 @@ type mcsAPIParams struct {
 	CtrlRuntimeManager ctrlRuntime.Manager
 	Scheme             *runtime.Scheme
 
-	Logger   logrus.FieldLogger
-	JobGroup job.Group
+	Logger          *slog.Logger
+	JobGroup        job.Group
+	MetricsRegistry *metrics.Registry
 }
 
 var requiredGVK = []schema.GroupVersionKind{
@@ -91,30 +100,32 @@ func registerMCSAPIController(params mcsAPIParams) error {
 		return nil
 	}
 
-	params.Logger.WithField("requiredGVK", requiredGVK).Info("Checking for required MCS-API resources")
+	params.Logger.Info(
+		"Checking for required MCS-API resources",
+		logfields.RequiredGVK, requiredGVK,
+	)
 	if err := checkRequiredCRDs(context.Background(), params.Clientset); err != nil {
-		params.Logger.WithError(err).Error("Required MCS-API resources are not found, please refer to docs for installation instructions")
+		params.Logger.Error(
+			"Required MCS-API resources are not found, please refer to docs for installation instructions",
+			logfields.Error, err,
+		)
 		return err
 	}
 	if err := mcsapiv1alpha1.AddToScheme(params.Scheme); err != nil {
 		return err
 	}
 
-	if err := newMCSAPIServiceReconciler(params.CtrlRuntimeManager, params.Logger, params.ClusterInfo.Name).SetupWithManager(params.CtrlRuntimeManager); err != nil {
+	if err := newMCSAPIServiceReconciler(params.CtrlRuntimeManager, params.Logger).SetupWithManager(params.CtrlRuntimeManager); err != nil {
 		return fmt.Errorf("Failed to register MCSAPIServiceReconciler: %w", err)
 	}
 
-	// Upstream controller that we use as is to update the ServiceImport
-	// objects with the IPs of the derived Services.
-	svcReconciler := mcsapicontrollers.ServiceReconciler{
-		Client: params.CtrlRuntimeManager.GetClient(),
-		Log:    params.CtrlRuntimeManager.GetLogger(),
-	}
-	if err := svcReconciler.SetupWithManager(params.CtrlRuntimeManager); err != nil {
-		return fmt.Errorf("Failed to register mcsapicontrollers.ServiceReconciler: %w", err)
+	if err := newMCSAPIEndpointSliceMirrorReconciler(params.CtrlRuntimeManager, params.Logger, params.ClusterInfo.Name).SetupWithManager(params.CtrlRuntimeManager); err != nil {
+		return fmt.Errorf("Failed to register MCSAPIEndpointSliceMirrorReconciler: %w", err)
 	}
 
 	params.Logger.Info("Multi-Cluster Services API support enabled")
+
+	registerMCSAPICollector(params.MetricsRegistry, params.Logger, params.CtrlRuntimeManager.GetClient())
 
 	remoteClusterServiceSource := &remoteClusterServiceExportSource{Logger: params.Logger}
 	params.ClusterMesh.RegisterClusterServiceExportUpdateHook(remoteClusterServiceSource.onClusterServiceExportEvent)

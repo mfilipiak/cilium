@@ -11,6 +11,7 @@ import (
 	"github.com/cilium/hive/cell"
 
 	agentK8s "github.com/cilium/cilium/daemon/k8s"
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/ipcache"
 	ipcacheTypes "github.com/cilium/cilium/pkg/ipcache/types"
 	"github.com/cilium/cilium/pkg/k8s"
@@ -29,8 +30,7 @@ type k8sEndpointsWatcherParams struct {
 	K8sResourceSynced *k8sSynced.Resources
 	K8sAPIGroups      *k8sSynced.APIGroups
 
-	ServiceCache k8s.ServiceCache
-	IPCache      *ipcache.IPCache
+	IPCache *ipcache.IPCache
 }
 
 func newK8sEndpointsWatcher(params k8sEndpointsWatcherParams) *K8sEndpointsWatcher {
@@ -38,7 +38,6 @@ func newK8sEndpointsWatcher(params k8sEndpointsWatcherParams) *K8sEndpointsWatch
 		k8sResourceSynced: params.K8sResourceSynced,
 		k8sAPIGroups:      params.K8sAPIGroups,
 		resources:         params.Resources,
-		k8sSvcCache:       params.ServiceCache,
 		ipcache:           params.IPCache,
 		stop:              make(chan struct{}),
 	}
@@ -54,8 +53,7 @@ type K8sEndpointsWatcher struct {
 	k8sAPIGroups *k8sSynced.APIGroups
 	resources    agentK8s.Resources
 
-	k8sSvcCache k8s.ServiceCache
-	ipcache     ipcacheManager
+	ipcache ipcacheManager
 
 	stop chan struct{}
 }
@@ -96,7 +94,6 @@ func (k *K8sEndpointsWatcher) endpointsInit() {
 					k.updateEndpoint(event.Object, swg)
 				case resource.Delete:
 					k.k8sResourceSynced.SetEventTimestamp(apiGroup)
-					k.k8sSvcCache.DeleteEndpoints(event.Object.EndpointSliceID, swg)
 				}
 				event.Done(nil)
 			}
@@ -109,14 +106,13 @@ func (k *K8sEndpointsWatcher) stopWatcher() {
 }
 
 func (k *K8sEndpointsWatcher) updateEndpoint(eps *k8s.Endpoints, swgEps *lock.StoppableWaitGroup) {
-	k.k8sSvcCache.UpdateEndpoints(eps, swgEps)
 	k.addKubeAPIServerServiceEndpoints(eps)
 }
 
 func (k *K8sEndpointsWatcher) addKubeAPIServerServiceEndpoints(eps *k8s.Endpoints) {
 	if eps == nil ||
-		eps.EndpointSliceID.ServiceID.Name != "kubernetes" ||
-		eps.EndpointSliceID.ServiceID.Namespace != "default" {
+		eps.EndpointSliceID.ServiceName.Name() != "kubernetes" ||
+		eps.EndpointSliceID.ServiceName.Namespace() != "default" {
 		return
 	}
 	resource := ipcacheTypes.NewResourceID(
@@ -124,10 +120,10 @@ func (k *K8sEndpointsWatcher) addKubeAPIServerServiceEndpoints(eps *k8s.Endpoint
 		eps.ObjectMeta.GetNamespace(),
 		eps.ObjectMeta.GetName(),
 	)
-	desiredIPs := make(map[netip.Prefix]struct{})
+	desiredIPs := make(map[cmtypes.PrefixCluster]struct{})
 	for addrCluster := range eps.Backends {
 		addr := addrCluster.Addr()
-		desiredIPs[netip.PrefixFrom(addr, addr.BitLen())] = struct{}{}
+		desiredIPs[cmtypes.NewLocalPrefixCluster(netip.PrefixFrom(addr, addr.BitLen()))] = struct{}{}
 	}
 	k.handleKubeAPIServerServiceEPChanges(desiredIPs, resource)
 }
@@ -142,7 +138,7 @@ func (k *K8sEndpointsWatcher) addKubeAPIServerServiceEndpoints(eps *k8s.Endpoint
 //
 // The actual implementation of this logic down to the datapath is handled
 // asynchronously.
-func (k *K8sEndpointsWatcher) handleKubeAPIServerServiceEPChanges(desiredIPs map[netip.Prefix]struct{}, rid ipcacheTypes.ResourceID) {
+func (k *K8sEndpointsWatcher) handleKubeAPIServerServiceEPChanges(desiredIPs map[cmtypes.PrefixCluster]struct{}, rid ipcacheTypes.ResourceID) {
 	src := source.KubeAPIServer
 
 	// We must perform a diff on the ipcache.identityMetadata map in order to
@@ -167,6 +163,6 @@ func (k *K8sEndpointsWatcher) handleKubeAPIServerServiceEPChanges(desiredIPs map
 	)
 
 	for ip := range desiredIPs {
-		k.ipcache.UpsertLabels(ip, labels.LabelKubeAPIServer, src, rid)
+		k.ipcache.UpsertMetadata(ip, src, rid, labels.LabelKubeAPIServer)
 	}
 }

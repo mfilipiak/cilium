@@ -4,6 +4,8 @@
 package option
 
 import (
+	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/spf13/viper"
@@ -11,11 +13,8 @@ import (
 
 	"github.com/cilium/cilium/pkg/command"
 	"github.com/cilium/cilium/pkg/logging"
-	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
 )
-
-var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "option")
 
 const (
 	// EndpointGCIntervalDefault is the default time for the CEP GC
@@ -95,11 +94,6 @@ const (
 
 	// AWS options
 
-	// AWSInstanceLimitMapping allows overwirting AWS instance limits defined in
-	// pkg/aws/eni/limits.go
-	// e.g. {"a1.medium": "2,4,4", "a2.custom2": "4,5,6"}
-	AWSInstanceLimitMapping = "aws-instance-limit-mapping"
-
 	// AWSReleaseExcessIPs allows releasing excess free IP addresses from ENI.
 	// Enabling this option reduces waste of IP addresses but may increase
 	// the number of API calls to AWS EC2 service.
@@ -128,10 +122,6 @@ const (
 
 	// ParallelAllocWorkers specifies the number of parallel workers to be used for IPAM allocation
 	ParallelAllocWorkers = "parallel-alloc-workers"
-
-	// UpdateEC2AdapterLimitViaAPI configures the operator to use the EC2
-	// API to fill out the instancetype to adapter limit mapping.
-	UpdateEC2AdapterLimitViaAPI = "update-ec2-adapter-limit-via-api"
 
 	// EC2APIEndpoint is the custom API endpoint to use for the EC2 AWS service,
 	// e.g. "ec2-fips.us-west-1.amazonaws.com" to use a FIPS endpoint in the us-west-1 region.
@@ -223,6 +213,9 @@ const (
 	// PodRestartSelector specify the labels contained in the pod that needs to be restarted before the node can be de-stained
 	// default values: k8s-app=kube-dns
 	PodRestartSelector = "pod-restart-selector"
+
+	// AWSPaginationEnabled toggles pagination for AWS EC2 API requests
+	AWSPaginationEnabled = "aws-pagination-enabled"
 )
 
 // OperatorConfig is the configuration used by the operator.
@@ -321,11 +314,6 @@ type OperatorConfig struct {
 	// ParallelAllocWorkers specifies the number of parallel workers to be used for accessing cloud provider APIs .
 	ParallelAllocWorkers int64
 
-	// AWSInstanceLimitMapping allows overwriting AWS instance limits defined in
-	// pkg/aws/eni/limits.go
-	// e.g. {"a1.medium": "2,4,4", "a2.custom2": "4,5,6"}
-	AWSInstanceLimitMapping map[string]string
-
 	// AWSReleaseExcessIps allows releasing excess free IP addresses from ENI.
 	// Enabling this option reduces waste of IP addresses but may increase
 	// the number of API calls to AWS EC2 service.
@@ -338,10 +326,6 @@ type OperatorConfig struct {
 	// AWSUsePrimaryAddress specifies whether an interface's primary address should be available for allocations on
 	// node
 	AWSUsePrimaryAddress bool
-
-	// UpdateEC2AdapterLimitViaAPI configures the operator to use the EC2 API to fill out the
-	// instancetype to adapter limit mapping.
-	UpdateEC2AdapterLimitViaAPI bool
 
 	// ExcessIPReleaseDelay controls how long operator would wait before an IP previously marked as excess is released.
 	// Defaults to 180 secs
@@ -411,10 +395,13 @@ type OperatorConfig struct {
 
 	// PodRestartSelector specify the labels contained in the pod that needs to be restarted before the node can be de-stained
 	PodRestartSelector string
+
+	// AWSPaginationEnabled toggles pagination for AWS EC2 API requests
+	AWSPaginationEnabled bool
 }
 
 // Populate sets all options with the values from viper.
-func (c *OperatorConfig) Populate(vp *viper.Viper) {
+func (c *OperatorConfig) Populate(logger *slog.Logger, vp *viper.Viper) {
 	c.NodesGCInterval = vp.GetDuration(NodesGCInterval)
 	c.EnableMetrics = vp.GetBool(EnableMetrics)
 	c.EndpointGCInterval = vp.GetDuration(EndpointGCInterval)
@@ -469,10 +456,10 @@ func (c *OperatorConfig) Populate(vp *viper.Viper) {
 	c.AWSReleaseExcessIPs = vp.GetBool(AWSReleaseExcessIPs)
 	c.AWSEnablePrefixDelegation = vp.GetBool(AWSEnablePrefixDelegation)
 	c.AWSUsePrimaryAddress = vp.GetBool(AWSUsePrimaryAddress)
-	c.UpdateEC2AdapterLimitViaAPI = vp.GetBool(UpdateEC2AdapterLimitViaAPI)
 	c.EC2APIEndpoint = vp.GetString(EC2APIEndpoint)
 	c.ExcessIPReleaseDelay = vp.GetInt(ExcessIPReleaseDelay)
 	c.ENIGarbageCollectionInterval = vp.GetDuration(ENIGarbageCollectionInterval)
+	c.AWSPaginationEnabled = vp.GetBool(AWSPaginationEnabled)
 
 	// Azure options
 
@@ -493,37 +480,31 @@ func (c *OperatorConfig) Populate(vp *viper.Viper) {
 	}
 
 	if m, err := command.GetStringMapStringE(vp, IPAMSubnetsTags); err != nil {
-		log.Fatalf("unable to parse %s: %s", IPAMSubnetsTags, err)
+		logging.Fatal(logger, fmt.Sprintf("unable to parse %s: %s", IPAMSubnetsTags, err))
 	} else {
 		c.IPAMSubnetsTags = m
 	}
 
 	if m, err := command.GetStringMapStringE(vp, IPAMInstanceTags); err != nil {
-		log.Fatalf("unable to parse %s: %s", IPAMInstanceTags, err)
+		logging.Fatal(logger, fmt.Sprintf("unable to parse %s: %s", IPAMInstanceTags, err))
 	} else {
 		c.IPAMInstanceTags = m
 	}
 
-	if m, err := command.GetStringMapStringE(vp, AWSInstanceLimitMapping); err != nil {
-		log.Fatalf("unable to parse %s: %s", AWSInstanceLimitMapping, err)
-	} else {
-		c.AWSInstanceLimitMapping = m
-	}
-
 	if m, err := command.GetStringMapStringE(vp, ENITags); err != nil {
-		log.Fatalf("unable to parse %s: %s", ENITags, err)
+		logging.Fatal(logger, fmt.Sprintf("unable to parse %s: %s", ENITags, err))
 	} else {
 		c.ENITags = m
 	}
 
 	if m, err := command.GetStringMapStringE(vp, ENIGarbageCollectionTags); err != nil {
-		log.Fatalf("unable to parse %s: %s", ENIGarbageCollectionTags, err)
+		logging.Fatal(logger, fmt.Sprintf("unable to parse %s: %s", ENIGarbageCollectionTags, err))
 	} else {
 		c.ENIGarbageCollectionTags = m
 	}
 
 	if m, err := command.GetStringMapStringE(vp, IPAMAutoCreateCiliumPodIPPools); err != nil {
-		log.Fatalf("unable to parse %s: %s", IPAMAutoCreateCiliumPodIPPools, err)
+		logging.Fatal(logger, fmt.Sprintf("unable to parse %s: %s", IPAMAutoCreateCiliumPodIPPools, err))
 	} else {
 		c.IPAMAutoCreateCiliumPodIPPools = m
 	}
@@ -535,7 +516,6 @@ var Config = &OperatorConfig{
 	IPAMSubnetsTags:                make(map[string]string),
 	IPAMInstanceTags:               make(map[string]string),
 	IPAMAutoCreateCiliumPodIPPools: make(map[string]string),
-	AWSInstanceLimitMapping:        make(map[string]string),
 	ENITags:                        make(map[string]string),
 	ENIGarbageCollectionTags:       make(map[string]string),
 }

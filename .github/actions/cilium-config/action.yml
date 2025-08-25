@@ -13,9 +13,15 @@ inputs:
   endpoint-routes:
     description: 'Enable endpoint routes'
     default: 'false'
+  ipv4:
+    description: 'Enable IPv4'
+    default: 'true'
   ipv6:
     description: 'Enable IPv6'
     default: 'true'
+  underlay:
+    description: 'Underlay protocol for the VXLAN or GENEVE tunnels'
+    default: 'ipv4'
   kpr:
     description: 'Enable kube-proxy replacement'
     default: 'false'
@@ -30,9 +36,6 @@ inputs:
     default: ''
   encryption-node:
     description: 'Enable node-to-node encryption (WireGuard only)'
-    default: 'false'
-  encryption-overlay:
-    description: 'Encrypt the overlay itself (IPsec only)'
     default: 'false'
   encryption-strict-mode:
     description: 'Enable strict mode encryption (WireGuard only)'
@@ -85,6 +88,8 @@ runs:
             --helm-set=authentication.mutual.spire.enabled=${{ inputs.mutual-auth }} \
             --nodes-without-cilium \
             --helm-set-string=kubeProxyReplacement=${{ inputs.kpr }} \
+            --helm-set=l2NeighDiscovery.enabled=true \
+            --helm-set-string=encryption.ipsec.keyRotationDuration="1m" \
             --set='${{ inputs.misc }}'"
 
           if [ -f "${{ inputs.chart-dir }}/../../../.github/actions/helm-default/ci-required-values.yaml" ]; then
@@ -126,9 +131,17 @@ runs:
             ENDPOINT_ROUTES="--helm-set-string=endpointRoutes.enabled=true"
           fi
 
+          IPV4=""
+          if [ "${{ inputs.ipv4 }}" == "false" ]; then
+            IPV4="--helm-set=ipv4.enabled=false"
+          fi
+
           IPV6=""
           if [ "${{ inputs.ipv6 }}" != "false" ]; then
             IPV6="--helm-set=ipv6.enabled=true"
+            if [ "${{ inputs.underlay }}" == "ipv6" ]; then
+              IPV6+=" --helm-set=underlayProtocol=ipv6"
+            fi
           fi
 
           MASQ=""
@@ -152,9 +165,6 @@ runs:
             ENCRYPT="--helm-set=encryption.enabled=true --helm-set=encryption.type=${{ inputs.encryption }}"
             if [ "${{ inputs.encryption-node }}" != "" ]; then
               ENCRYPT+=" --helm-set=encryption.nodeEncryption=${{ inputs.encryption-node }}"
-            fi
-            if [ "${{ inputs.encryption-overlay }}" != "" ]; then
-              ENCRYPT+=" --helm-set=encryption.ipsec.encryptedOverlay=${{ inputs.encryption-overlay }}"
             fi
             if [ "${{ inputs.encryption-strict-mode }}" != "" ]; then
               ENCRYPT+=" --helm-set=encryption.strictMode.enabled=${{ inputs.encryption-strict-mode }}"
@@ -188,5 +198,5 @@ runs:
             BGP_CONTROL_PLANE="${{ env.BGP_CONTROL_PLANE_HELM_VALUES }}"
           fi
 
-          CONFIG="${DEFAULTS} ${IMAGE} ${TUNNEL} ${DEVICES} ${LB_MODE} ${ENDPOINT_ROUTES} ${IPV6} ${MASQ} ${EGRESS_GATEWAY} ${ENCRYPT} ${HOST_FW} ${LB_ACCELERATION} ${INGRESS_CONTROLLER} ${CILIUMENDPOINTSLICE} ${LOCAL_REDIRECT_POLICY} ${BGP_CONTROL_PLANE}"
+          CONFIG="${DEFAULTS} ${IMAGE} ${TUNNEL} ${DEVICES} ${LB_MODE} ${ENDPOINT_ROUTES} ${IPV4} ${IPV6} ${MASQ} ${EGRESS_GATEWAY} ${ENCRYPT} ${HOST_FW} ${LB_ACCELERATION} ${INGRESS_CONTROLLER} ${CILIUMENDPOINTSLICE} ${LOCAL_REDIRECT_POLICY} ${BGP_CONTROL_PLANE}"
           echo "config=${CONFIG}" >> $GITHUB_OUTPUT

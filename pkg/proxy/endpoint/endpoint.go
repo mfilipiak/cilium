@@ -12,10 +12,10 @@ import (
 // EndpointInfoSource returns information about an endpoint being proxied.
 // The read lock must be held when calling any method.
 type EndpointInfoSource interface {
+	GetPolicyNames() []string
 	GetID() uint64
 	GetIPv4Address() string
 	GetIPv6Address() string
-	ConntrackNameLocked() string
 	GetNamedPort(ingress bool, name string, proto u8proto.U8proto) uint16
 }
 
@@ -37,4 +37,8 @@ type EndpointUpdater interface {
 	// desired policy, if any.
 	// Must be called with Endpoint's read lock taken.
 	GetPolicyVersionHandle() *versioned.VersionHandle
+
+	// GetListenerProxyPort returns the proxy port for the given listener reference.
+	// Returns zero if the proxy port does not exist (yet).
+	GetListenerProxyPort(listener string) uint16
 }

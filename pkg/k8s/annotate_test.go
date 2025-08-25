@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,6 +54,7 @@ func TestPrepareRemoveNodeAnnotationsPayload(t *testing.T) {
 }
 
 func TestPatchingCIDRAnnotation(t *testing.T) {
+	logger := hivetest.Logger(t)
 	node.WithTestLocalNodeStore(func() {
 		prevAnnotateK8sNode := option.Config.AnnotateK8sNode
 		option.Config.AnnotateK8sNode = true
@@ -86,22 +88,22 @@ func TestPatchingCIDRAnnotation(t *testing.T) {
 				if err != nil {
 					require.NoError(t, err)
 				}
-				patchWanted := []byte(fmt.Sprintf(`{"metadata":{"annotations":%s}}`, raw))
+				patchWanted := fmt.Appendf(nil, `{"metadata":{"annotations":%s}}`, raw)
 
 				patchReceived := action.(k8stesting.PatchAction).GetPatch()
-				require.EqualValues(t, string(patchWanted), string(patchReceived))
+				require.Equal(t, string(patchWanted), string(patchReceived))
 				patchChan <- true
 				return true, n1copy, nil
 			})
 
-		node1Cilium := ParseNode(toSlimNode(node1.DeepCopy()), source.Unspec)
+		node1Cilium := ParseNode(logger, toSlimNode(node1.DeepCopy()), source.Unspec)
 		node1Cilium.SetCiliumInternalIP(net.ParseIP("10.254.0.1"))
 		node.SetIPv4AllocRange(node1Cilium.IPv4AllocCIDR)
 
-		require.Equal(t, "10.2.0.0/16", node.GetIPv4AllocRange().String())
+		require.Equal(t, "10.2.0.0/16", node.GetIPv4AllocRange(logger).String())
 		// IPv6 Node range is not checked because it shouldn't be changed.
 
-		_, err := AnnotateNode(fakeK8sClient, "node1", *node1Cilium, 0)
+		_, err := AnnotateNode(logger, fakeK8sClient, "node1", *node1Cilium, 0)
 
 		require.NoError(t, err)
 
@@ -143,25 +145,25 @@ func TestPatchingCIDRAnnotation(t *testing.T) {
 				if err != nil {
 					require.NoError(t, err)
 				}
-				patchWanted := []byte(fmt.Sprintf(`{"metadata":{"annotations":%s}}`, raw))
+				patchWanted := fmt.Appendf(nil, `{"metadata":{"annotations":%s}}`, raw)
 
 				patchReceived := action.(k8stesting.PatchAction).GetPatch()
-				require.EqualValues(t, string(patchWanted), string(patchReceived))
+				require.Equal(t, string(patchWanted), string(patchReceived))
 				patchChan <- true
 				return true, n2Copy, nil
 			})
 
-		node2Cilium := ParseNode(toSlimNode(node2.DeepCopy()), source.Unspec)
+		node2Cilium := ParseNode(hivetest.Logger(t), toSlimNode(node2.DeepCopy()), source.Unspec)
 		node2Cilium.SetCiliumInternalIP(net.ParseIP("10.254.0.1"))
 		node.SetIPv4AllocRange(node2Cilium.IPv4AllocCIDR)
 		node.SetIPv6NodeRange(node2Cilium.IPv6AllocCIDR)
 
 		// We use the node's annotation for the IPv4 and the PodCIDR for the
 		// IPv6.
-		require.Equal(t, "10.254.0.0/16", node.GetIPv4AllocRange().String())
-		require.Equal(t, "aaaa:aaaa:aaaa:aaaa:beef:beef::/96", node.GetIPv6AllocRange().String())
+		require.Equal(t, "10.254.0.0/16", node.GetIPv4AllocRange(logger).String())
+		require.Equal(t, "aaaa:aaaa:aaaa:aaaa:beef:beef::/96", node.GetIPv6AllocRange(logger).String())
 
-		_, err = AnnotateNode(fakeK8sClient, "node2", *node2Cilium, 0)
+		_, err = AnnotateNode(hivetest.Logger(t), fakeK8sClient, "node2", *node2Cilium, 0)
 
 		require.NoError(t, err)
 
@@ -192,7 +194,7 @@ func TestRemovalOfNodeAnnotations(t *testing.T) {
 			delete(n1copy.Annotations, annotation.V4CIDRName)
 			patchWanted := []byte("[{\"op\":\"remove\",\"path\":\"/metadata/annotations/network.cilium.io~1ipv4-pod-cidr\",\"value\":null}]")
 			patchReceived := action.(k8stesting.PatchAction).GetPatch()
-			require.EqualValues(t, string(patchWanted), string(patchReceived))
+			require.Equal(t, string(patchWanted), string(patchReceived))
 			patchChan <- true
 			return true, n1copy, nil
 		})
@@ -206,6 +208,49 @@ func TestRemovalOfNodeAnnotations(t *testing.T) {
 		t.Errorf("d.fakeK8sClient.CoreV1().Nodes().Update() was not called")
 		t.FailNow()
 	}
+}
+
+func convertToAddress(v1Addrs []v1.NodeAddress) []slim_corev1.NodeAddress {
+	if v1Addrs == nil {
+		return nil
+	}
+
+	addrs := make([]slim_corev1.NodeAddress, 0, len(v1Addrs))
+	for _, addr := range v1Addrs {
+		addrs = append(
+			addrs,
+			slim_corev1.NodeAddress{
+				Type:    slim_corev1.NodeAddressType(addr.Type),
+				Address: addr.Address,
+			},
+		)
+	}
+	return addrs
+}
+
+func convertToTaints(v1Taints []v1.Taint) []slim_corev1.Taint {
+	if v1Taints == nil {
+		return nil
+	}
+
+	taints := make([]slim_corev1.Taint, 0, len(v1Taints))
+	for _, taint := range v1Taints {
+		var ta *slim_metav1.Time
+		if taint.TimeAdded != nil {
+			t := slim_metav1.NewTime(taint.TimeAdded.Time)
+			ta = &t
+		}
+		taints = append(
+			taints,
+			slim_corev1.Taint{
+				Key:       taint.Key,
+				Value:     taint.Value,
+				Effect:    slim_corev1.TaintEffect(taint.Effect),
+				TimeAdded: ta,
+			},
+		)
+	}
+	return taints
 }
 
 func toSlimNode(node *v1.Node) *slim_corev1.Node {

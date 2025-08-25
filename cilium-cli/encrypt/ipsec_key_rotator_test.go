@@ -19,15 +19,15 @@ func Test_IsIPsecAlgoSupported(t *testing.T) {
 			expected: true,
 		},
 		{
-			have:     "gcm-aes",
+			have:     "rfc4106-gcm-aes",
 			expected: true,
 		},
 		{
-			have:     "hmac-sha256",
+			have:     "cbc-aes-sha256",
 			expected: true,
 		},
 		{
-			have:     "hmac-sha512",
+			have:     "cbc-aes-sha512",
 			expected: true,
 		},
 		{
@@ -115,7 +115,7 @@ func Test_rotateIPsecKey(t *testing.T) {
 			},
 		},
 		{
-			haveAlgo: "gcm-aes",
+			haveAlgo: "rfc4106-gcm-aes",
 			haveKey: ipsecKey{
 				spi: 16,
 			},
@@ -127,7 +127,7 @@ func Test_rotateIPsecKey(t *testing.T) {
 			},
 		},
 		{
-			haveAlgo: "hmac-sha256",
+			haveAlgo: "cbc-aes-sha256",
 			haveKey: ipsecKey{
 				spi: 3,
 			},
@@ -140,7 +140,7 @@ func Test_rotateIPsecKey(t *testing.T) {
 			},
 		},
 		{
-			haveAlgo: "hmac-sha512",
+			haveAlgo: "cbc-aes-sha512",
 			haveKey: ipsecKey{
 				spi: 4,
 			},
@@ -161,8 +161,8 @@ func Test_rotateIPsecKey(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, tt.expected.spi, actual.spi)
 		require.Equal(t, tt.expected.algo, actual.algo)
-		require.Equal(t, len(tt.expected.key), len(actual.key))
-		require.Equal(t, len(tt.expected.cipherKey), len(actual.cipherKey))
+		require.Len(t, actual.key, len(tt.expected.key))
+		require.Len(t, actual.cipherKey, len(tt.expected.cipherKey))
 		require.Equal(t, tt.expected.size, actual.size)
 		require.Equal(t, tt.expected.cipherMode, actual.cipherMode)
 		if tt.expected.cipherMode == "" {

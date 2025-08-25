@@ -4,28 +4,14 @@
 package options
 
 import (
-	"bytes"
-	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-
-	"github.com/cilium/cilium/pkg/logging"
 )
 
 func TestRedact(t *testing.T) {
-	want := "level=info msg=\"configured Hubble with redact options\" options=\"&{CacheSize:3 HubbleRedactSettings:{Enabled:true RedactHTTPQuery:false RedactHTTPUserInfo:false RedactKafkaAPIKey:false RedactHttpHeaders:{Allow:map[] Deny:map[]}}}\"\n"
-	var buf bytes.Buffer
-	logger := slog.New(
-		slog.NewTextHandler(&buf,
-			&slog.HandlerOptions{
-				ReplaceAttr: logging.ReplaceAttrFnWithoutTimestamp,
-			},
-		),
-	)
-	opt := Redact(logger, false, false, false, nil, nil)
-	opt(&Options{
-		CacheSize: 3,
+	opt := WithRedact(true, false, false, nil, nil)
+	opts := Options{
 		HubbleRedactSettings: HubbleRedactSettings{
 			Enabled:            false,
 			RedactHTTPQuery:    false,
@@ -36,6 +22,22 @@ func TestRedact(t *testing.T) {
 				Deny:  map[string]struct{}{"tracecontent": {}},
 			},
 		},
-	})
-	assert.Equal(t, want, buf.String())
+	}
+	opt(&opts)
+	assert.True(t, opts.HubbleRedactSettings.Enabled)
+	assert.True(t, opts.HubbleRedactSettings.RedactHTTPQuery)
+}
+
+func TestEnableNetworkPolicyCorrelation(t *testing.T) {
+	opt := WithNetworkPolicyCorrelation(true)
+	opts := Options{EnableNetworkPolicyCorrelation: false}
+	opt(&opts)
+	assert.True(t, opts.EnableNetworkPolicyCorrelation)
+}
+
+func TestSkipUnknownCGroupIDs(t *testing.T) {
+	opt := WithSkipUnknownCGroupIDs(false)
+	opts := Options{SkipUnknownCGroupIDs: true}
+	opt(&opts)
+	assert.False(t, opts.SkipUnknownCGroupIDs)
 }

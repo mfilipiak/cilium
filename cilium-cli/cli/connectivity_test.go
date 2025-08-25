@@ -12,7 +12,7 @@ import (
 	"github.com/cilium/cilium/cilium-cli/api"
 	"github.com/cilium/cilium/cilium-cli/connectivity/check"
 	"github.com/cilium/cilium/cilium-cli/defaults"
-	"github.com/cilium/cilium/cilium-cli/utils/codeowners"
+	"github.com/cilium/cilium/tools/testowners/codeowners"
 )
 
 func TestNewConnectivityTests(t *testing.T) {
@@ -83,7 +83,7 @@ func TestNewConnectivityTests(t *testing.T) {
 		}
 
 		// function to test
-		actual, err := newConnectivityTests(tt.params, &api.NopHooks{}, check.NewConcurrentLogger(&bytes.Buffer{}, 1), owners)
+		actual, err := newConnectivityTests(tt.params, &api.NopHooks{}, check.NewConcurrentLogger(&bytes.Buffer{}), owners)
 
 		require.NoError(t, err)
 		require.Len(t, actual, tt.expectedCount)

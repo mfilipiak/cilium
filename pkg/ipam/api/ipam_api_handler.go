@@ -5,6 +5,7 @@ package ipamapi
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 
@@ -29,7 +30,8 @@ type IpamDeleteIpamIPHandler struct {
 }
 
 type IpamPostIpamHandler struct {
-	IPAM *ipam.IPAM
+	Logger *slog.Logger
+	IPAM   *ipam.IPAM
 }
 
 type IpamPostIpamIPHandler struct {
@@ -55,7 +57,7 @@ func (r *IpamPostIpamHandler) Handle(params ipamapi.PostIpamParams) middleware.R
 	}
 
 	resp := &models.IPAMResponse{
-		HostAddressing: node.GetNodeAddressing(),
+		HostAddressing: node.GetNodeAddressing(r.Logger),
 		Address:        &models.AddressPair{},
 	}
 

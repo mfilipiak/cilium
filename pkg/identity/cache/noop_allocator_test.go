@@ -7,6 +7,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cilium/cilium/pkg/identity"
@@ -26,8 +27,8 @@ func TestNoopAllocateIdentity(t *testing.T) {
 	lbls2 := labels.NewLabelsFromSortedList("id=bar;user=anna")
 	lbls3 := labels.NewLabelsFromSortedList("id=bar;user=susan")
 
-	mgr := NewNoopIdentityAllocator()
-	<-mgr.InitIdentityAllocator(nil)
+	mgr := NewNoopIdentityAllocator(hivetest.Logger(t))
+	<-mgr.InitIdentityAllocator(nil, nil)
 	defer mgr.Close()
 
 	// Noop AllocateIdentity always returns id=init, isNew=false, error=nil,
@@ -36,30 +37,30 @@ func TestNoopAllocateIdentity(t *testing.T) {
 	require.NotNil(t, id1a)
 	require.NoError(t, err)
 	require.False(t, isNew)
-	require.EqualValues(t, initID.LabelArray, id1a.LabelArray)
+	require.Equal(t, initID.LabelArray, id1a.LabelArray)
 
 	id1b, isNew, err := mgr.AllocateIdentity(context.Background(), lbls1, false, identity.InvalidIdentity)
 	require.NotNil(t, id1b)
 	require.NoError(t, err)
 	require.False(t, isNew)
-	require.EqualValues(t, initID.LabelArray, id1b.LabelArray)
+	require.Equal(t, initID.LabelArray, id1b.LabelArray)
 
 	id2, isNew, err := mgr.AllocateIdentity(context.Background(), lbls2, false, identity.InvalidIdentity)
 	require.NotNil(t, id2)
 	require.NoError(t, err)
 	require.False(t, isNew)
-	require.EqualValues(t, initID.LabelArray, id2.LabelArray)
+	require.Equal(t, initID.LabelArray, id2.LabelArray)
 
 	id3, isNew, err := mgr.AllocateIdentity(context.Background(), lbls3, false, identity.InvalidIdentity)
 	require.NotNil(t, id3)
 	require.NoError(t, err)
 	require.False(t, isNew)
-	require.EqualValues(t, initID.LabelArray, id3.LabelArray)
+	require.Equal(t, initID.LabelArray, id3.LabelArray)
 
 	reservedID := identity.LookupReservedIdentity(identity.ReservedIdentityHost)
 	id4, isNew, err := mgr.AllocateIdentity(context.Background(), reservedID.Labels, false, identity.InvalidIdentity)
 	require.NotNil(t, id4)
 	require.NoError(t, err)
 	require.False(t, isNew)
-	require.EqualValues(t, initID.LabelArray, id4.LabelArray)
+	require.Equal(t, initID.LabelArray, id4.LabelArray)
 }

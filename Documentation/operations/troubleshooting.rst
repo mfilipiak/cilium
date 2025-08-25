@@ -338,7 +338,7 @@ queried for the connectivity status of the last probe.
 
 .. code-block:: shell-session
 
-   $ kubectl -n kube-system exec -ti cilium-2hq5z -- cilium-health status
+   $ kubectl -n kube-system exec -ti cilium-2hq5z -- cilium-health status --verbose
    Probe time:   2018-06-16T09:51:58Z
    Nodes:
      ip-172-0-52-116.us-west-2.compute.internal (localhost):
@@ -549,9 +549,7 @@ Once the node is known, the troubleshooting steps are as follows:
 1. Find the Cilium pod on the node experiencing the problematic policymap
    pressure and obtain a shell via ``kubectl exec``.
 2. Use ``cilium policy selectors`` to get an overview of which selectors are
-   selecting many identities. The output of this command as of Cilium v1.15
-   additionally displays the namespace and name of the policy resource of each
-   selector.
+   selecting many identities.
 3. The type of selector tells you what sort of policy rule could be having an
    impact. The three existing types of selectors are explained below, each with
    specific steps depending on the selector. See the steps below corresponding
@@ -774,9 +772,9 @@ fails between endpoints across multiple nodes.
 Troubleshooting steps:
 ~~~~~~~~~~~~~~~~~~~~~~
 
-#. Run ``cilium-health status`` on the node of the source and destination
-   endpoint. It should describe the connectivity from that node to other
-   nodes in the cluster, and to a simulated endpoint on each other node.
+#. Run ``cilium-health status --verbose`` on the node of the source and
+   destination endpoint. It should describe the connectivity from that node to
+   other nodes in the cluster, and to a simulated endpoint on each other node.
    Identify points in the cluster that cannot talk to each other. If the
    command does not describe the status of the other node, there may be an
    issue with the KV-Store.

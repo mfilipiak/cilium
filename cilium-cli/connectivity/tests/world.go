@@ -25,7 +25,7 @@ import (
 
 // PodToWorld sends multiple HTTP(S) requests to ExternalTarget
 // from each client Pods.
-func PodToWorld(opts ...RetryOption) check.Scenario {
+func PodToWorld(ipv6 bool, opts ...RetryOption) check.Scenario {
 	cond := &retryCondition{}
 	for _, op := range opts {
 		op(cond)
@@ -33,6 +33,7 @@ func PodToWorld(opts ...RetryOption) check.Scenario {
 	return &podToWorld{
 		ScenarioBase: check.NewScenarioBase(),
 		rc:           cond,
+		ipv6:         ipv6,
 	}
 }
 
@@ -40,7 +41,8 @@ func PodToWorld(opts ...RetryOption) check.Scenario {
 type podToWorld struct {
 	check.ScenarioBase
 
-	rc *retryCondition
+	rc   *retryCondition
+	ipv6 bool
 }
 
 func (s *podToWorld) Name() string {
@@ -62,25 +64,33 @@ func (s *podToWorld) Run(ctx context.Context, t *check.Test) {
 	ct := t.Context()
 
 	for _, client := range ct.ClientPods() {
-		// With http, over port 80.
-		httpOpts := s.rc.CurlOptions(http, features.IPFamilyAny, client, ct.Params())
-		t.NewAction(s, fmt.Sprintf("http-to-%s-%d", extTarget, i), &client, http, features.IPFamilyAny).Run(func(a *check.Action) {
-			a.ExecInPod(ctx, a.CurlCommand(http, httpOpts...))
-			a.ValidateFlows(ctx, client, a.GetEgressRequirements(fp))
-		})
+		t.ForEachIPFamily(func(ipFam features.IPFamily) {
+			// IPv6 to world may not be supported in all environments, even though IPv6 is enabled
+			// and working in the cluster internally.
+			if ipFam == features.IPFamilyV6 && !s.ipv6 {
+				return
+			}
 
-		// With https, over port 443.
-		httpsOpts := s.rc.CurlOptions(https, features.IPFamilyAny, client, ct.Params())
-		t.NewAction(s, fmt.Sprintf("https-to-%s-%d", extTarget, i), &client, https, features.IPFamilyAny).Run(func(a *check.Action) {
-			a.ExecInPod(ctx, a.CurlCommand(https, httpsOpts...))
-			a.ValidateFlows(ctx, client, a.GetEgressRequirements(fp))
-		})
+			// With http, over port 80.
+			httpOpts := s.rc.CurlOptions(http, ipFam, client, ct.Params())
+			t.NewAction(s, fmt.Sprintf("http-to-%s-%s-%d", extTarget, ipFam, i), &client, http, ipFam).Run(func(a *check.Action) {
+				a.ExecInPod(ctx, a.CurlCommand(http, httpOpts...))
+				a.ValidateFlows(ctx, client, a.GetEgressRequirements(fp))
+			})
 
-		// With https, over port 443, index.html.
-		httpsindexOpts := s.rc.CurlOptions(httpsindex, features.IPFamilyAny, client, ct.Params())
-		t.NewAction(s, fmt.Sprintf("https-to-%s-index-%d", extTarget, i), &client, httpsindex, features.IPFamilyAny).Run(func(a *check.Action) {
-			a.ExecInPod(ctx, a.CurlCommand(httpsindex, httpsindexOpts...))
-			a.ValidateFlows(ctx, client, a.GetEgressRequirements(fp))
+			// With https, over port 443.
+			httpsOpts := s.rc.CurlOptions(https, ipFam, client, ct.Params())
+			t.NewAction(s, fmt.Sprintf("https-to-%s-%s-%d", extTarget, ipFam, i), &client, https, ipFam).Run(func(a *check.Action) {
+				a.ExecInPod(ctx, a.CurlCommand(https, httpsOpts...))
+				a.ValidateFlows(ctx, client, a.GetEgressRequirements(fp))
+			})
+
+			// With https, over port 443, index.html.
+			httpsindexOpts := s.rc.CurlOptions(httpsindex, ipFam, client, ct.Params())
+			t.NewAction(s, fmt.Sprintf("https-to-%s-index-%s-%d", extTarget, ipFam, i), &client, httpsindex, ipFam).Run(func(a *check.Action) {
+				a.ExecInPod(ctx, a.CurlCommand(httpsindex, httpsindexOpts...))
+				a.ValidateFlows(ctx, client, a.GetEgressRequirements(fp))
+			})
 		})
 
 		i++
@@ -89,15 +99,17 @@ func (s *podToWorld) Run(ctx context.Context, t *check.Test) {
 
 // PodToWorld2 sends an HTTPS request to ExternalOtherTarget from random client
 // Pods.
-func PodToWorld2() check.Scenario {
+func PodToWorld2(ipv6 bool) check.Scenario {
 	return &podToWorld2{
 		ScenarioBase: check.NewScenarioBase(),
+		ipv6:         ipv6,
 	}
 }
 
 // podToWorld2 implements a Scenario.
 type podToWorld2 struct {
 	check.ScenarioBase
+	ipv6 bool
 }
 
 func (s *podToWorld2) Name() string {
@@ -117,11 +129,19 @@ func (s *podToWorld2) Run(ctx context.Context, t *check.Test) {
 	ct := t.Context()
 
 	for _, client := range ct.ClientPods() {
-		// With https, over port 443.
-		t.NewAction(s, fmt.Sprintf("https-%s-%d", extTarget, i), &client, https, features.IPFamilyAny).Run(func(a *check.Action) {
-			a.ExecInPod(ctx, a.CurlCommand(https))
-			a.ValidateFlows(ctx, client, a.GetEgressRequirements(fp))
-			a.ValidateMetrics(ctx, client, a.GetEgressMetricsRequirements())
+		t.ForEachIPFamily(func(ipFam features.IPFamily) {
+			// IPv6 to world may not be supported in all environments, even though IPv6 is enabled
+			// and working in the cluster internally.
+			if ipFam == features.IPFamilyV6 && !s.ipv6 {
+				return
+			}
+
+			// With https, over port 443.
+			t.NewAction(s, fmt.Sprintf("https-%s-%s-%d", extTarget, ipFam, i), &client, https, ipFam).Run(func(a *check.Action) {
+				a.ExecInPod(ctx, a.CurlCommand(https))
+				a.ValidateFlows(ctx, client, a.GetEgressRequirements(fp))
+				a.ValidateMetrics(ctx, client, a.GetEgressMetricsRequirements())
+			})
 		})
 
 		i++

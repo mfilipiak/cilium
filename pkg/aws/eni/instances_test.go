@@ -4,7 +4,6 @@
 package eni
 
 import (
-	"context"
 	"testing"
 
 	"github.com/cilium/hive/hivetest"
@@ -193,30 +192,31 @@ var (
 	}
 )
 
-func iteration1(api *ec2mock.API, mngr *InstancesManager) {
+func iteration1(t *testing.T, api *ec2mock.API, mngr *InstancesManager) {
 	api.UpdateENIs(enis)
-	mngr.Resync(context.TODO())
+	mngr.Resync(t.Context())
 }
 
-func iteration2(api *ec2mock.API, mngr *InstancesManager) {
+func iteration2(t *testing.T, api *ec2mock.API, mngr *InstancesManager) {
 	api.UpdateSubnets(subnets2)
 	api.UpdateSecurityGroups(securityGroups2)
 	api.UpdateENIs(enis2)
-	mngr.Resync(context.TODO())
+	mngr.Resync(t.Context())
 }
 
 func TestGetSubnet(t *testing.T) {
 	api := ec2mock.NewAPI(subnets, vpcs, securityGroups, routeTables)
 	require.NotNil(t, api)
 
-	mngr := NewInstancesManager(hivetest.Logger(t), api)
+	mngr, err := NewInstancesManager(hivetest.Logger(t), api)
+	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
 	require.Nil(t, mngr.GetSubnet("subnet-1"))
 	require.Nil(t, mngr.GetSubnet("subnet-2"))
 	require.Nil(t, mngr.GetSubnet("subnet-3"))
 
-	iteration1(api, mngr)
+	iteration1(t, api, mngr)
 
 	subnet1 := mngr.GetSubnet("subnet-1")
 	require.NotNil(t, subnet1)
@@ -228,7 +228,7 @@ func TestGetSubnet(t *testing.T) {
 
 	require.Nil(t, mngr.GetSubnet("subnet-3"))
 
-	iteration2(api, mngr)
+	iteration2(t, api, mngr)
 
 	subnet1 = mngr.GetSubnet("subnet-1")
 	require.NotNil(t, subnet1)
@@ -247,11 +247,12 @@ func TestFindSubnetByIDs(t *testing.T) {
 	api := ec2mock.NewAPI(subnets2, vpcs, securityGroups, routeTables)
 	require.NotNil(t, api)
 
-	mngr := NewInstancesManager(hivetest.Logger(t), api)
+	mngr, err := NewInstancesManager(hivetest.Logger(t), api)
+	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
-	iteration1(api, mngr)
-	iteration2(api, mngr)
+	iteration1(t, api, mngr)
+	iteration2(t, api, mngr)
 
 	// exact match subnet-1
 	s := mngr.FindSubnetByIDs("vpc-1", "us-west-1", []string{"subnet-1"})
@@ -286,11 +287,12 @@ func TestFindSubnetByTags(t *testing.T) {
 	api := ec2mock.NewAPI(subnets, vpcs, securityGroups, routeTables)
 	require.NotNil(t, api)
 
-	mngr := NewInstancesManager(hivetest.Logger(t), api)
+	mngr, err := NewInstancesManager(hivetest.Logger(t), api)
+	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
-	iteration1(api, mngr)
-	iteration2(api, mngr)
+	iteration1(t, api, mngr)
+	iteration2(t, api, mngr)
 
 	// exact match subnet-1
 	s := mngr.FindSubnetByTags("vpc-1", "us-west-1", ipamTypes.Tags{"tag1": "tag1"})
@@ -322,7 +324,8 @@ func TestGetSecurityGroupByTags(t *testing.T) {
 	api := ec2mock.NewAPI(subnets, vpcs, securityGroups, routeTables)
 	require.NotNil(t, api)
 
-	mngr := NewInstancesManager(hivetest.Logger(t), api)
+	mngr, err := NewInstancesManager(hivetest.Logger(t), api)
+	require.NoError(t, err)
 	require.NotNil(t, mngr)
 
 	sgGroups := mngr.FindSecurityGroupByTags("vpc-1", map[string]string{
@@ -330,7 +333,7 @@ func TestGetSecurityGroupByTags(t *testing.T) {
 	})
 	require.Empty(t, sgGroups)
 
-	iteration1(api, mngr)
+	iteration1(t, api, mngr)
 	reqTags := ipamTypes.Tags{
 		"k1": "v1",
 	}
@@ -338,7 +341,7 @@ func TestGetSecurityGroupByTags(t *testing.T) {
 	require.Len(t, sgGroups, 1)
 	require.Equal(t, reqTags, sgGroups[0].Tags)
 
-	iteration2(api, mngr)
+	iteration2(t, api, mngr)
 	reqTags = ipamTypes.Tags{
 		"k2": "v2",
 	}
@@ -347,7 +350,7 @@ func TestGetSecurityGroupByTags(t *testing.T) {
 	require.Equal(t, reqTags, sgGroups[0].Tags)
 
 	// iteration 3
-	mngr.Resync(context.TODO())
+	mngr.Resync(t.Context())
 	reqTags = ipamTypes.Tags{
 		"k3": "v3",
 	}

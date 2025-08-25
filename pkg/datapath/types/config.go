@@ -11,16 +11,8 @@ import (
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/mac"
 	"github.com/cilium/cilium/pkg/node"
-	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 )
-
-// NodeNeighborEnqueuer provides an interface for clients to push node updates
-// for further processing.
-type NodeNeighborEnqueuer interface {
-	// Enqueue enqueues a node for processing node neighbors updates.
-	Enqueue(*nodeTypes.Node)
-}
 
 // DeviceConfiguration is an interface for injecting configuration of datapath
 // options that affect lookups and logic applied at a per-device level, whether
@@ -55,9 +47,6 @@ type LoadTimeConfiguration interface {
 // compile time.
 type CompileTimeConfiguration interface {
 	DeviceConfiguration
-
-	// TODO: Move this detail into the datapath
-	ConntrackLocalLocked() bool
 
 	// RequireARPPassthrough returns true if the datapath must implement
 	// ARP passthrough for this endpoint
@@ -114,9 +103,9 @@ type ConfigWriter interface {
 // packet sent from a local endpoint to an IP address belonging to the CIDR
 // should not be SNAT'd.
 func RemoteSNATDstAddrExclusionCIDRv4(localNode node.LocalNode) *cidr.CIDR {
-	if localNode.IPv4NativeRoutingCIDR != nil {
+	if localNode.Local.IPv4NativeRoutingCIDR != nil {
 		// ipv4-native-routing-cidr is set or has been autodetected, so use it
-		return localNode.IPv4NativeRoutingCIDR
+		return localNode.Local.IPv4NativeRoutingCIDR
 	}
 
 	return localNode.IPv4AllocCIDR
@@ -126,9 +115,9 @@ func RemoteSNATDstAddrExclusionCIDRv4(localNode node.LocalNode) *cidr.CIDR {
 // packet sent from a local endpoint to an IP address belonging to the CIDR
 // should not be SNAT'd.
 func RemoteSNATDstAddrExclusionCIDRv6(localNode node.LocalNode) *cidr.CIDR {
-	if localNode.IPv6NativeRoutingCIDR != nil {
+	if localNode.Local.IPv6NativeRoutingCIDR != nil {
 		// ipv6-native-routing-cidr is set or has been autodetected, so use it
-		return localNode.IPv6NativeRoutingCIDR
+		return localNode.Local.IPv6NativeRoutingCIDR
 	}
 
 	return localNode.IPv6AllocCIDR

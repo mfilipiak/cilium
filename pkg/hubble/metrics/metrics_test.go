@@ -4,7 +4,6 @@
 package metrics
 
 import (
-	"context"
 	"errors"
 	"io"
 	"log"
@@ -57,8 +56,7 @@ func TestInitializedMetrics(t *testing.T) {
 }
 
 func SetUpTestMetricsServer(reg *prometheus.Registry) *httptest.Server {
-	srv := httptest.NewServer(nil)
-	InitMetricsServerHandler(srv.Config, reg, false)
+	srv := httptest.NewServer(ServerHandler(reg, false))
 	return srv
 }
 
@@ -90,7 +88,7 @@ func ConfigureAndFetchMetrics(t *testing.T, testName string, metricCfg []string,
 
 		var err error
 		for _, nh := range EnabledMetrics {
-			err = errors.Join(err, nh.Handler.ProcessFlow(context.TODO(), flow))
+			err = errors.Join(err, nh.Handler.ProcessFlow(t.Context(), flow))
 		}
 		require.NoError(t, err)
 
@@ -156,32 +154,32 @@ func TestReadMetricConfigFromCM(t *testing.T) {
 	// Attempt to re-register drop handler with fewer labels should fail.
 	watcher.resetCfgPath("testdata/valid_metric_config_drop_fewer_labels.yaml")
 	_, _, _, err = watcher.readConfig()
-	require.EqualErrorf(t, err, "invalid yaml config file: metric config validation failed - label set cannot be changed without restarting Prometheus. metric: drop", "")
+	require.EqualError(t, err, "invalid yaml config file: metric config validation failed - label set cannot be changed without restarting Prometheus. metric: drop")
 
 	// Attempt to register metric handlers with missing names should fail.
 	watcher.resetCfgPath("testdata/invalid_config_missing_name.yaml")
 	_, _, _, err = watcher.readConfig()
-	require.EqualErrorf(t, err, "invalid yaml config file: metric config validation failed - missing metric name at: 0\nmetric config validation failed - missing metric name at: 1", "")
+	require.EqualError(t, err, "invalid yaml config file: metric config validation failed - missing metric name at: 0\nmetric config validation failed - missing metric name at: 1")
 }
 
 func assertMetricConfig(t *testing.T, expected, actual api.MetricConfig) {
 	assert.Equal(t, expected.Name, actual.Name)
 
-	assert.Equal(t, len(expected.ContextOptionConfigs), len(actual.ContextOptionConfigs))
+	assert.Len(t, actual.ContextOptionConfigs, len(expected.ContextOptionConfigs))
 	for i, c := range expected.ContextOptionConfigs {
-		assert.Equal(t, len(expected.ContextOptionConfigs[i].Values), len(actual.ContextOptionConfigs[i].Values))
+		assert.Len(t, actual.ContextOptionConfigs[i].Values, len(expected.ContextOptionConfigs[i].Values))
 		assert.Equal(t, expected.ContextOptionConfigs[i].Name, actual.ContextOptionConfigs[i].Name)
 		for j, s := range c.Values {
 			assert.Equal(t, expected.ContextOptionConfigs[i].Values[j], s)
 		}
 	}
 
-	assert.Equal(t, len(expected.IncludeFilters), len(actual.IncludeFilters))
+	assert.Len(t, actual.IncludeFilters, len(expected.IncludeFilters))
 	for i := range expected.IncludeFilters {
 		assert.Equal(t, expected.IncludeFilters[i].String(), actual.IncludeFilters[i].String())
 	}
 
-	assert.Equal(t, len(expected.ExcludeFilters), len(actual.ExcludeFilters))
+	assert.Len(t, actual.ExcludeFilters, len(expected.ExcludeFilters))
 	for i := range expected.ExcludeFilters {
 		assert.Equal(t, expected.ExcludeFilters[i].String(), actual.ExcludeFilters[i].String())
 	}
@@ -197,7 +195,7 @@ func TestHandlersUpdatedInDfpOnConfigChange(t *testing.T) {
 	cfg, _, _, err := watcher.readConfig()
 	require.NoError(t, err)
 
-	dfp.onConfigReload(context.TODO(), 0, *cfg)
+	dfp.onConfigReload(t.Context(), 0, *cfg)
 	assertHandlersInDfp(t, &dfp, cfg)
 
 	// Handlers: =drop, +flow
@@ -205,7 +203,7 @@ func TestHandlersUpdatedInDfpOnConfigChange(t *testing.T) {
 	cfg, _, _, err = watcher.readConfig()
 	require.NoError(t, err)
 
-	dfp.onConfigReload(context.TODO(), 0, *cfg)
+	dfp.onConfigReload(t.Context(), 0, *cfg)
 	assertHandlersInDfp(t, &dfp, cfg)
 
 	// Handlers: -drop, =flow
@@ -213,7 +211,7 @@ func TestHandlersUpdatedInDfpOnConfigChange(t *testing.T) {
 	cfg, _, _, err = watcher.readConfig()
 	require.NoError(t, err)
 
-	dfp.onConfigReload(context.TODO(), 0, *cfg)
+	dfp.onConfigReload(t.Context(), 0, *cfg)
 	assertHandlersInDfp(t, &dfp, cfg)
 
 	// Handlers: -drop, =flow+filter
@@ -221,7 +219,7 @@ func TestHandlersUpdatedInDfpOnConfigChange(t *testing.T) {
 	cfg, _, _, err = watcher.readConfig()
 	require.NoError(t, err)
 
-	dfp.onConfigReload(context.TODO(), 0, *cfg)
+	dfp.onConfigReload(t.Context(), 0, *cfg)
 	assertHandlersInDfp(t, &dfp, cfg)
 
 	// Handlers: =flow~filter
@@ -229,13 +227,13 @@ func TestHandlersUpdatedInDfpOnConfigChange(t *testing.T) {
 	cfg, _, _, err = watcher.readConfig()
 	require.NoError(t, err)
 
-	dfp.onConfigReload(context.TODO(), 0, *cfg)
+	dfp.onConfigReload(t.Context(), 0, *cfg)
 	assertHandlersInDfp(t, &dfp, cfg)
 }
 
 func assertHandlersInDfp(t *testing.T, dfp *DynamicFlowProcessor, cfg *api.Config) {
 	names := cfg.GetMetricNames()
-	assert.Equal(t, len(names), len(dfp.Metrics))
+	assert.Len(t, dfp.Metrics, len(names))
 	for _, m := range dfp.Metrics {
 		_, ok := names[m.Name]
 		assert.True(t, ok)
@@ -251,7 +249,7 @@ func TestMetricReRegisterAndCollect(t *testing.T) {
 
 	reg := prometheus.NewPedanticRegistry()
 	dfp := DynamicFlowProcessor{registry: reg, logger: slog.Default()}
-	dfp.onConfigReload(context.TODO(), 0, *cfg)
+	dfp.onConfigReload(t.Context(), 0, *cfg)
 
 	flow1 := &pb.Flow{
 		EventType: &pb.CiliumEventType{Type: monitorAPI.MessageTypePolicyVerdict},
@@ -267,7 +265,7 @@ func TestMetricReRegisterAndCollect(t *testing.T) {
 		DropReasonDesc: pb.DropReason_POLICY_DENIED,
 	}
 
-	_, errs := dfp.OnDecodedFlow(context.TODO(), flow1)
+	_, errs := dfp.OnDecodedFlow(t.Context(), flow1)
 	assert.NoError(t, errs)
 
 	metricFamilies, err := reg.Gather()
@@ -280,7 +278,7 @@ func TestMetricReRegisterAndCollect(t *testing.T) {
 	cfg, _, _, err = watcher.readConfig()
 	require.NoError(t, err)
 
-	dfp.onConfigReload(context.TODO(), 0, *cfg)
+	dfp.onConfigReload(t.Context(), 0, *cfg)
 	assert.NoError(t, errs)
 
 	// The existing drop metrics should be removed after the handler is deregistered.
@@ -293,10 +291,10 @@ func TestMetricReRegisterAndCollect(t *testing.T) {
 	cfg, _, _, err = watcher.readConfig()
 	require.NoError(t, err)
 
-	dfp.onConfigReload(context.TODO(), 0, *cfg)
+	dfp.onConfigReload(t.Context(), 0, *cfg)
 	assert.NoError(t, errs)
 
-	_, errs = dfp.OnDecodedFlow(context.TODO(), flow1)
+	_, errs = dfp.OnDecodedFlow(t.Context(), flow1)
 	assert.NoError(t, errs)
 
 	metricFamilies, err = reg.Gather()
@@ -340,7 +338,7 @@ func ConfigureAndFetchDynamicMetrics(t *testing.T, testName string, exportedMetr
 		require.NoError(t, err)
 
 		dfp := DynamicFlowProcessor{registry: reg, logger: slog.Default()}
-		dfp.onConfigReload(context.TODO(), 0, *cfg)
+		dfp.onConfigReload(t.Context(), 0, *cfg)
 
 		flow1 := &pb.Flow{
 			EventType: &pb.CiliumEventType{Type: monitorAPI.MessageTypePolicyVerdict},
@@ -356,7 +354,7 @@ func ConfigureAndFetchDynamicMetrics(t *testing.T, testName string, exportedMetr
 			DropReasonDesc: pb.DropReason_POLICY_DENIED,
 		}
 
-		_, errs := dfp.OnDecodedFlow(context.TODO(), flow1)
+		_, errs := dfp.OnDecodedFlow(t.Context(), flow1)
 		assert.NoError(t, errs)
 
 		resp, err := http.Get("http://" + srv.Listener.Addr().String() + "/metrics")

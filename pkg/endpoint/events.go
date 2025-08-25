@@ -10,10 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sirupsen/logrus"
-
 	"github.com/cilium/cilium/pkg/datapath/linux/bandwidth"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/eventqueue"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
@@ -26,20 +23,20 @@ type EndpointRegenerationEvent struct {
 }
 
 // Handle handles the regeneration event for the endpoint.
-func (ev *EndpointRegenerationEvent) Handle(res chan interface{}) {
+func (ev *EndpointRegenerationEvent) Handle(res chan any) {
 	e := ev.ep
 	regenContext := ev.regenContext
 
 	// Compute policy on the first regeneration before acquiring the build permit in
 	// QueueEndpointBuild below
 	select {
-	case <-e.InitialEnvoyPolicyComputed:
+	case <-e.initialEnvoyPolicyComputed:
 		// Already done
 	default:
 		err, release := e.ComputeInitialPolicy(regenContext)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
-				e.getLogger().WithError(err).Error("Initial policy compute failed")
+				e.getLogger().Error("Initial policy compute failed", logfields.Error, err)
 			}
 
 			res <- &EndpointRegenerationResult{
@@ -64,10 +61,10 @@ func (ev *EndpointRegenerationEvent) Handle(res chan interface{}) {
 	// We should only queue the request after we use all the endpoint's
 	// lock/unlock. Otherwise this can get a deadlock if the endpoint is
 	// being deleted at the same time. More info PR-1777.
-	doneFunc, err := e.owner.QueueEndpointBuild(regenContext.parentContext, uint64(e.ID))
+	doneFunc, err := e.epBuildQueue.QueueEndpointBuild(regenContext.parentContext, uint64(e.ID))
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
-			e.getLogger().WithError(err).Warning("unable to queue endpoint build")
+			e.getLogger().Warn("unable to queue endpoint build", logfields.Error, err)
 		}
 	} else if doneFunc != nil {
 		e.getLogger().Debug("Dequeued endpoint from build queue")
@@ -96,42 +93,6 @@ type EndpointRegenerationResult struct {
 	err error
 }
 
-// EndpointRevisionBumpEvent contains all fields necessary to bump the policy
-// revision of a given endpoint.
-type EndpointRevisionBumpEvent struct {
-	Rev uint64
-	ep  *Endpoint
-}
-
-// Handle handles the revision bump event for the Endpoint.
-func (ev *EndpointRevisionBumpEvent) Handle(res chan interface{}) {
-	// TODO: if the endpoint is not in a 'ready' state that means that
-	// we cannot set the policy revision, as something else has
-	// changed endpoint state which necessitates regeneration,
-	// *or* the endpoint is in a not-ready state (i.e., a prior
-	// regeneration failed, so there is no way that we can
-	// realize the policy revision yet. Should this be signaled
-	// to the routine waiting for the result of this event?
-	ev.ep.SetPolicyRevision(ev.Rev)
-	res <- struct{}{}
-}
-
-// PolicyRevisionBumpEvent queues an event for the given endpoint to set its
-// realized policy revision to rev. This may block depending on if events have
-// been queued up for the given endpoint. It blocks until the event has
-// succeeded, or if the event has been cancelled.
-func (e *Endpoint) PolicyRevisionBumpEvent(rev uint64) {
-	epBumpEvent := eventqueue.NewEvent(&EndpointRevisionBumpEvent{Rev: rev, ep: e})
-	// Don't check policy revision event results - it is best effort.
-	_, err := e.eventQueue.Enqueue(epBumpEvent)
-	if err != nil {
-		log.WithFields(logrus.Fields{
-			logfields.PolicyRevision: rev,
-			logfields.EndpointID:     e.ID,
-		}).Errorf("enqueue of EndpointRevisionBumpEvent failed: %s", err)
-	}
-}
-
 // EndpointNoTrackEvent contains all fields necessary to update the NOTRACK rules.
 type EndpointNoTrackEvent struct {
 	ep      *Endpoint
@@ -139,7 +100,7 @@ type EndpointNoTrackEvent struct {
 }
 
 // Handle handles the NOTRACK rule update.
-func (ev *EndpointNoTrackEvent) Handle(res chan interface{}) {
+func (ev *EndpointNoTrackEvent) Handle(res chan any) {
 	var port uint16
 
 	e := ev.ep
@@ -170,21 +131,21 @@ func (ev *EndpointNoTrackEvent) Handle(res chan interface{}) {
 	}
 
 	if port != e.noTrackPort {
-		log.Debug("Updating NOTRACK rules")
-		if e.IPv4.IsValid() {
+		e.getLogger().Debug("Updating NOTRACK rules")
+		if option.Config.EnableIPv4 && e.IPv4.IsValid() {
 			if port > 0 {
-				e.owner.IPTablesManager().InstallNoTrackRules(e.IPv4, port)
+				e.ipTablesManager.InstallNoTrackRules(e.IPv4, port)
 			}
 			if e.noTrackPort > 0 {
-				e.owner.IPTablesManager().RemoveNoTrackRules(e.IPv4, e.noTrackPort)
+				e.ipTablesManager.RemoveNoTrackRules(e.IPv4, e.noTrackPort)
 			}
 		}
-		if e.IPv6.IsValid() {
+		if option.Config.EnableIPv6 && e.IPv6.IsValid() {
 			if port > 0 {
-				e.owner.IPTablesManager().InstallNoTrackRules(e.IPv6, port)
+				e.ipTablesManager.InstallNoTrackRules(e.IPv6, port)
 			}
 			if e.noTrackPort > 0 {
-				e.owner.IPTablesManager().RemoveNoTrackRules(e.IPv6, e.noTrackPort)
+				e.ipTablesManager.RemoveNoTrackRules(e.IPv6, e.noTrackPort)
 			}
 		}
 		e.noTrackPort = port
@@ -198,7 +159,6 @@ func (ev *EndpointNoTrackEvent) Handle(res chan interface{}) {
 // EndpointPolicyBandwidthEvent contains all fields necessary to update
 // the Pod's bandwidth policy.
 type EndpointPolicyBandwidthEvent struct {
-	bwm              datapath.BandwidthManager
 	ep               *Endpoint
 	bandwidthEgress  string
 	bandwidthIngress string
@@ -206,10 +166,10 @@ type EndpointPolicyBandwidthEvent struct {
 }
 
 // Handle handles the policy bandwidth update.
-func (ev *EndpointPolicyBandwidthEvent) Handle(res chan interface{}) {
+func (ev *EndpointPolicyBandwidthEvent) Handle(res chan any) {
 	var bps, ingressBps, prio uint64
 
-	if !ev.bwm.Enabled() {
+	if !ev.ep.bandwidthManager.Enabled() {
 		res <- &EndpointRegenerationResult{
 			err: nil,
 		}
@@ -235,7 +195,11 @@ func (ev *EndpointPolicyBandwidthEvent) Handle(res chan interface{}) {
 		bps, err = bandwidth.GetBytesPerSec(ev.bandwidthEgress)
 	}
 	if err != nil {
-		e.getLogger().WithError(err).Debugf("failed to parse bandwidth limit %q", ev.bandwidthEgress)
+		e.getLogger().Debug(
+			"failed to parse bandwidth limit",
+			logfields.BandwidthLimit, ev.bandwidthEgress,
+			logfields.Error, err,
+		)
 	} else {
 		bwmUpdateNeeded = true
 	}
@@ -252,22 +216,30 @@ func (ev *EndpointPolicyBandwidthEvent) Handle(res chan interface{}) {
 			// Also support explicitly setting priority values.
 			prio, err = strconv.ParseUint(ev.priority, 10, 32)
 			if err != nil {
-				e.getLogger().WithError(err).Debugf("failed to parse priority value %q", ev.priority)
+				e.getLogger().Debug(
+					"failed to parse priority value",
+					logfields.Priority, ev.priority,
+					logfields.Error, err,
+				)
 			} else {
 				prio += 1
 			}
 		}
 	}
 	if err != nil {
-		e.getLogger().WithError(err).Debugf("failed to parse priority value limit %q", ev.priority)
+		e.getLogger().Debug(
+			"failed to parse priority value limit",
+			logfields.Priority, ev.priority,
+			logfields.Error, err,
+		)
 	} else {
 		bwmUpdateNeeded = true
 	}
 
 	if bwmUpdateNeeded {
-		ev.bwm.UpdateBandwidthLimit(e.ID, bps, uint32(prio))
+		ev.ep.bandwidthManager.UpdateBandwidthLimit(e.ID, bps, uint32(prio))
 	} else {
-		ev.bwm.DeleteBandwidthLimit(e.ID)
+		ev.ep.bandwidthManager.DeleteBandwidthLimit(e.ID)
 	}
 	if err != nil {
 		res <- &EndpointRegenerationResult{
@@ -284,8 +256,11 @@ func (ev *EndpointPolicyBandwidthEvent) Handle(res chan interface{}) {
 	if bps != 0 {
 		bpsNew = strconv.FormatUint(bps, 10)
 	}
-	e.getLogger().Debugf("Updating %s from %s to %s bytes/sec", bandwidth.EgressBandwidth,
-		bpsOld, bpsNew)
+	e.getLogger().Debug(
+		"Updating "+bandwidth.EgressBandwidth+" bytes/sec",
+		logfields.Old, bpsOld,
+		logfields.New, bpsNew,
+	)
 	e.bps = bps
 
 	if ev.bandwidthIngress != "" {
@@ -296,7 +271,7 @@ func (ev *EndpointPolicyBandwidthEvent) Handle(res chan interface{}) {
 			}
 			return
 		}
-		ev.bwm.UpdateIngressBandwidthLimit(e.ID, ingressBps)
+		ev.ep.bandwidthManager.UpdateIngressBandwidthLimit(e.ID, ingressBps)
 
 		bpsOld = "inf"
 		bpsNew = "inf"
@@ -306,12 +281,15 @@ func (ev *EndpointPolicyBandwidthEvent) Handle(res chan interface{}) {
 		if ingressBps != 0 {
 			bpsNew = strconv.FormatUint(ingressBps, 10)
 		}
-		e.getLogger().Debugf("Updating %s from %s to %s bytes/sec", bandwidth.IngressBandwidth,
-			bpsOld, bpsNew)
+		e.getLogger().Debug(
+			"Updating "+bandwidth.IngressBandwidth+" bytes/sec",
+			logfields.Old, bpsOld,
+			logfields.New, bpsNew,
+		)
 
 		e.ingressBps = ingressBps
 	} else {
-		ev.bwm.DeleteIngressBandwidthLimit(e.ID)
+		ev.ep.bandwidthManager.DeleteIngressBandwidthLimit(e.ID)
 	}
 
 	res <- &EndpointRegenerationResult{
@@ -330,7 +308,7 @@ func (ev *EndpointPolicyBandwidthEvent) Handle(res chan interface{}) {
 // so that when its metadata is resolved, events can be enqueued (such as
 // bandwidth policy).
 func (e *Endpoint) InitEventQueue() {
-	e.eventQueue = eventqueue.NewEventQueueBuffered(fmt.Sprintf("endpoint-%d", e.ID), option.Config.EndpointQueueSize)
+	e.eventQueue = eventqueue.NewEventQueueBuffered(e.getLogger(), fmt.Sprintf("endpoint-%d", e.ID), option.Config.EndpointQueueSize)
 }
 
 // Start assigns a Cilium Endpoint ID to the endpoint and prepares it to
@@ -347,7 +325,7 @@ func (e *Endpoint) Start(id uint16) {
 	defer e.unlock()
 
 	e.ID = id
-	e.UpdateLogger(map[string]interface{}{
+	e.UpdateLogger(map[string]any{
 		logfields.EndpointID: e.ID,
 	})
 
@@ -384,6 +362,13 @@ func (e *Endpoint) Stop() {
 	// and when they will happen. After this point, no events for the endpoint
 	// will be processed on its EventQueue, specifically regenerations.
 	e.eventQueue.WaitToBeDrained()
+
+	// Shutdown the DNS History trigger after event queue has been drained.
+	// This makes sure that any pending changes to endpoint DNS state are flushed
+	// to disk.
+	if trigger := e.dnsHistoryTrigger.Swap(nil); trigger != nil {
+		trigger.Shutdown()
+	}
 
 	// Given that we are deleting the endpoint and that no more builds are
 	// going to occur for this endpoint, close the channel which signals whether

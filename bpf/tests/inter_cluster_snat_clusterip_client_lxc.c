@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 /* Copyright Authors of Cilium */
 
-#include "common.h"
-
 #include <bpf/ctx/skb.h>
+#include "common.h"
 #include "pktgen.h"
 
 /*
@@ -44,7 +43,7 @@
 /* Import some default values */
 
 /* Import map definitions and some default values */
-#include "node_config.h"
+#include <bpf/config/node.h>
 
 /* Overwrite (local) CLUSTER_ID defined in node_config.h */
 #undef CLUSTER_ID
@@ -59,7 +58,7 @@
 #include <bpf_lxc.c>
 
 /* Set the LXC source address to be the address of pod one */
-ASSIGN_CONFIG(__u32, endpoint_ipv4, CLIENT_IP)
+ASSIGN_CONFIG(union v4addr, endpoint_ipv4, { .be32 = CLIENT_IP})
 
 #include "lib/ipcache.h"
 #include "lib/lb.h"
@@ -80,7 +79,7 @@ struct {
 } entry_call_map __section(".maps") = {
 	.values = {
 		[FROM_CONTAINER] = &cil_from_container,
-		[HANDLE_POLICY] = &handle_policy,
+		[HANDLE_POLICY] = &cil_lxc_policy,
 	},
 };
 
@@ -234,7 +233,7 @@ int lxc_to_overlay_syn_check(struct __ctx_buff *ctx)
 	tuple.nexthdr = IPPROTO_TCP;
 	tuple.flags = TUPLE_F_SERVICE;
 
-	entry = map_lookup_elem(&CT_MAP_TCP4, &tuple);
+	entry = map_lookup_elem(&cilium_ct4_global, &tuple);
 	if (!entry)
 		test_fatal("couldn't find service conntrack entry");
 
@@ -263,11 +262,7 @@ SETUP("tc", "02_overlay_to_lxc_synack")
 int overlay_to_lxc_synack_setup(struct __ctx_buff *ctx)
 {
 	/* Emulate metadata filled by ipv4_local_delivery on bpf_overlay */
-	ctx_store_meta(ctx, CB_SRC_LABEL, BACKEND_IDENTITY);
-	ctx_store_meta(ctx, CB_DELIVERY_REDIRECT, 1);
-	ctx_store_meta(ctx, CB_CLUSTER_ID_INGRESS, 2);
-	ctx_store_meta(ctx, CB_FROM_HOST, 0);
-	ctx_store_meta(ctx, CB_FROM_TUNNEL, 1);
+	local_delivery_fill_meta(ctx, BACKEND_IDENTITY, true, false, true, 2);
 
 	/* Jump into the entrypoint */
 	tail_call_static(ctx, entry_call_map, HANDLE_POLICY);

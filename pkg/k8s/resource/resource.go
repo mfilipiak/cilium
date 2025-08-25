@@ -24,6 +24,7 @@ import (
 
 	k8smetrics "github.com/cilium/cilium/pkg/k8s/metrics"
 	"github.com/cilium/cilium/pkg/k8s/synced"
+	watcherMetrics "github.com/cilium/cilium/pkg/k8s/watchers/metrics"
 	"github.com/cilium/cilium/pkg/k8s/watchers/resources"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/metrics"
@@ -138,7 +139,9 @@ type Resource[T k8sRuntime.Object] interface {
 // See also pkg/k8s/resource/example/main.go for a runnable example.
 func New[T k8sRuntime.Object](lc cell.Lifecycle, lw cache.ListerWatcher, opts ...ResourceOption) Resource[T] {
 	r := &resource[T]{
-		lw: lw,
+		subscribers: make(map[uint64]*subscriber[T]),
+		needed:      make(chan struct{}, 1),
+		lw:          lw,
 	}
 	r.opts.sourceObj = func() k8sRuntime.Object {
 		var obj T
@@ -148,7 +151,7 @@ func New[T k8sRuntime.Object](lc cell.Lifecycle, lw cache.ListerWatcher, opts ..
 		o(&r.opts)
 	}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
-	r.reset()
+	r.storeResolver, r.storePromise = promise.New[Store[T]]()
 	lc.Append(r)
 	return r
 }
@@ -159,7 +162,6 @@ type options struct {
 	indexers       cache.Indexers                  // map of the optional custom indexers to be added to the underlying resource informer
 	metricScope    string                          // the scope label used when recording metrics for the resource
 	name           string                          // the name label used for the workqueue metrics
-	releasable     bool                            // if true, the underlying informer will be stopped when the last subscriber cancels its subscription
 	crdSyncPromise promise.Promise[synced.CRDSync] // optional promise to wait for
 }
 
@@ -220,23 +222,6 @@ func WithCRDSync(crdSyncPromise promise.Promise[synced.CRDSync]) ResourceOption 
 	}
 }
 
-// WithStoppableInformer marks the resource as releasable. A releasable resource stops
-// the underlying informer if the last active subscriber cancels its subscription.
-// In this case the resource is stopped and prepared again for a subsequent call to
-// either Events() or Store().
-// A subscriber is a consumer who has taken a reference to the store with Store() or that
-// is listening to the events stream channel with Events().
-// This option is meant to be used for very specific cases of resources with a high rate
-// of updates that can potentially hinder scalability in very large clusters, like
-// CiliumNode and CiliumEndpoint.
-// For this cases, stopping the informer is required when switching to other data sources
-// that scale better.
-func WithStoppableInformer() ResourceOption {
-	return func(o *options) {
-		o.releasable = true
-	}
-}
-
 type resource[T k8sRuntime.Object] struct {
 	mu     lock.RWMutex
 	ctx    context.Context
@@ -254,12 +239,6 @@ type resource[T k8sRuntime.Object] struct {
 
 	storePromise  promise.Promise[Store[T]]
 	storeResolver promise.Resolver[Store[T]]
-
-	// meaningful for releasable resources only
-	refsMu      lock.Mutex
-	refs        uint64
-	resetCtx    context.Context
-	resetCancel context.CancelFunc
 }
 
 var _ Resource[*corev1.Node] = &resource[*corev1.Node]{}
@@ -274,14 +253,11 @@ func (r *resource[T]) Store(ctx context.Context) (Store[T], error) {
 		defer r.mu.RUnlock()
 		return r.synchronized
 	}
-	cache.WaitForCacheSync(ctx.Done(), hasSynced)
+	if !cache.WaitForCacheSync(ctx.Done(), hasSynced) {
+		return nil, ctx.Err()
+	}
 
-	// use an error handler to release the resource if the store promise
-	// is rejected or the context is cancelled before the cache has synchronized.
-	return promise.MapError(r.storePromise, func(err error) error {
-		r.release()
-		return err
-	}).Await(ctx)
+	return r.storePromise.Await(ctx)
 }
 
 func (r *resource[T]) metricEventProcessed(eventKind EventKind, status bool) {
@@ -321,26 +297,12 @@ func (r *resource[T]) metricEventReceived(action string, valid, equal bool) {
 }
 
 func (r *resource[T]) Start(cell.HookContext) error {
-	r.start()
+	r.wg.Add(1)
+	go r.startWhenNeeded()
 	return nil
 }
 
-func (r *resource[T]) start() {
-	// Don't start the resource if it has been definitely stopped
-	if r.ctx.Err() != nil {
-		return
-	}
-	r.wg.Add(1)
-	go r.startWhenNeeded()
-}
-
 func (r *resource[T]) markNeeded() {
-	if r.opts.releasable {
-		r.refsMu.Lock()
-		r.refs++
-		r.refsMu.Unlock()
-	}
-
 	select {
 	case r.needed <- struct{}{}:
 	default:
@@ -348,18 +310,12 @@ func (r *resource[T]) markNeeded() {
 }
 
 func (r *resource[T]) startWhenNeeded() {
-	defer r.wg.Done()
-
 	// Wait until we're needed before starting the informer.
 	select {
 	case <-r.ctx.Done():
+		r.wg.Done()
 		return
 	case <-r.needed:
-	}
-
-	// Short-circuit if we're being stopped.
-	if r.ctx.Err() != nil {
-		return
 	}
 
 	// Wait for CRDs to have synced before trying to access (Cilium) k8s resources
@@ -368,19 +324,15 @@ func (r *resource[T]) startWhenNeeded() {
 	}
 
 	store, informer := r.newInformer()
-	r.storeResolver.Resolve(&typedStore[T]{
-		store:   store,
-		release: r.release,
-	})
+	r.storeResolver.Resolve(&typedStore[T]{store})
 
-	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		informer.Run(merge(r.ctx.Done(), r.resetCtx.Done()))
+		informer.Run(r.ctx.Done())
 	}()
 
 	// Wait for cache to be synced before emitting the sync event.
-	if cache.WaitForCacheSync(merge(r.ctx.Done(), r.resetCtx.Done()), informer.HasSynced) {
+	if cache.WaitForCacheSync(r.ctx.Done(), informer.HasSynced) {
 		// Emit the sync event for all subscribers. Subscribers
 		// that subscribe afterwards will emit it by checking
 		// r.synchronized.
@@ -394,12 +346,6 @@ func (r *resource[T]) startWhenNeeded() {
 }
 
 func (r *resource[T]) Stop(stopCtx cell.HookContext) error {
-	if r.opts.releasable {
-		// grab the refs lock to avoid a concurrent restart for releasable resource
-		r.refsMu.Lock()
-		defer r.refsMu.Unlock()
-	}
-
 	r.cancel()
 	r.wg.Wait()
 	return nil
@@ -469,13 +415,15 @@ func (r *resource[T]) Events(ctx context.Context, opts ...EventsOpt) <-chan Even
 		options:   options,
 		debugInfo: debugInfo,
 		wq: workqueue.NewTypedRateLimitingQueueWithConfig[WorkItem](options.rateLimiter,
-			workqueue.TypedRateLimitingQueueConfig[WorkItem]{Name: r.resourceName()}),
+			workqueue.TypedRateLimitingQueueConfig[WorkItem]{
+				Name:            r.resourceName(),
+				MetricsProvider: watcherMetrics.MetricsProvider,
+			}),
 	}
 
 	// Fork a goroutine to process the queued keys and pass them to the subscriber.
 	r.wg.Add(1)
 	go func() {
-		defer r.release()
 		defer r.wg.Done()
 		defer close(out)
 
@@ -522,7 +470,6 @@ func (r *resource[T]) Events(ctx context.Context, opts ...EventsOpt) <-chan Even
 		defer r.wg.Done()
 		select {
 		case <-r.ctx.Done():
-		case <-r.resetCtx.Done():
 		case <-ctx.Done():
 		}
 		subCancel()
@@ -530,39 +477,6 @@ func (r *resource[T]) Events(ctx context.Context, opts ...EventsOpt) <-chan Even
 	}()
 
 	return out
-}
-
-func (r *resource[T]) release() {
-	if !r.opts.releasable {
-		return
-	}
-
-	// in case of a releasable resource, stop the underlying informer when the last
-	// reference to it is released. The resource is restarted to be
-	// ready again in case of a subsequent call to either Events() or Store().
-
-	r.refsMu.Lock()
-	defer r.refsMu.Unlock()
-
-	r.refs--
-	if r.refs > 0 {
-		return
-	}
-
-	r.resetCancel()
-	r.wg.Wait()
-	close(r.needed)
-
-	r.reset()
-	r.start()
-}
-
-func (r *resource[T]) reset() {
-	r.subscribers = make(map[uint64]*subscriber[T])
-	r.needed = make(chan struct{}, 1)
-	r.synchronized = false
-	r.storeResolver, r.storePromise = promise.New[Store[T]]()
-	r.resetCtx, r.resetCancel = context.WithCancel(context.Background())
 }
 
 func (r *resource[T]) resourceName() string {
@@ -822,7 +736,7 @@ func (p *wrapperController) Run(stopCh <-chan struct{}) {
 
 func (r *resource[T]) newInformer() (cache.Indexer, cache.Controller) {
 	clientState := cache.NewIndexer(cache.DeletionHandlingMetaNamespaceKeyFunc, r.opts.indexers)
-	opts := cache.DeltaFIFOOptions{KeyFunction: cache.MetaNamespaceKeyFunc, KnownObjects: clientState}
+	opts := cache.DeltaFIFOOptions{KeyFunction: cache.MetaNamespaceKeyFunc, KnownObjects: clientState, EmitDeltaTypeReplaced: true}
 	fifo := cache.NewDeltaFIFOWithOptions(opts)
 	transformer := r.opts.transform
 	cacheMutationDetector := cache.NewCacheMutationDetector(fmt.Sprintf("%T", r))
@@ -831,8 +745,7 @@ func (r *resource[T]) newInformer() (cache.Indexer, cache.Controller) {
 		ListerWatcher:    r.lw,
 		ObjectType:       r.opts.sourceObj(),
 		FullResyncPeriod: 0,
-		RetryOnError:     false,
-		Process: func(obj interface{}, isInInitialList bool) error {
+		Process: func(obj any, isInInitialList bool) error {
 			// Processing of the deltas is done under the resource mutex. This
 			// avoids emitting double events for new subscribers that list the
 			// keys in the store.
@@ -840,7 +753,7 @@ func (r *resource[T]) newInformer() (cache.Indexer, cache.Controller) {
 			defer r.mu.RUnlock()
 
 			for _, d := range obj.(cache.Deltas) {
-				var obj interface{}
+				var obj any
 				if transformer != nil {
 					var err error
 					if obj, err = transformer(d.Object); err != nil {
@@ -861,7 +774,7 @@ func (r *resource[T]) newInformer() (cache.Indexer, cache.Controller) {
 				key := NewKey(obj)
 
 				switch d.Type {
-				case cache.Sync, cache.Added, cache.Updated:
+				case cache.Sync, cache.Added, cache.Updated, cache.Replaced:
 					metric := resources.MetricCreate
 					if d.Type != cache.Added {
 						metric = resources.MetricUpdate
@@ -912,16 +825,4 @@ func getUID(obj k8sRuntime.Object) types.UID {
 		panic(fmt.Sprintf("BUG: meta.Accessor() failed on %T: %s", obj, err))
 	}
 	return meta.GetUID()
-}
-
-func merge[T any](c1, c2 <-chan T) <-chan T {
-	m := make(chan T)
-	go func() {
-		select {
-		case <-c1:
-		case <-c2:
-		}
-		close(m)
-	}()
-	return m
 }

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -21,10 +22,11 @@ import (
 
 func TestBumpNextNumericIdentity(t *testing.T) {
 	testutils.IntegrationTest(t)
+	logger := hivetest.Logger(t)
 
 	minID, maxID := identity.NumericIdentity(1), identity.NumericIdentity(5)
 	scope := identity.NumericIdentity(0x42_00_00_00)
-	cache := newLocalIdentityCache(scope, minID, maxID)
+	cache := newLocalIdentityCache(logger, scope, minID, maxID)
 
 	for i := minID; i <= maxID; i++ {
 		require.Equal(t, i, cache.nextNumericIdentity)
@@ -37,10 +39,11 @@ func TestBumpNextNumericIdentity(t *testing.T) {
 
 func TestLocalIdentityCache(t *testing.T) {
 	testutils.IntegrationTest(t)
+	logger := hivetest.Logger(t)
 
 	minID, maxID := identity.NumericIdentity(1), identity.NumericIdentity(5)
 	scope := identity.NumericIdentity(0x42_00_00_00)
-	cache := newLocalIdentityCache(scope, minID, maxID)
+	cache := newLocalIdentityCache(logger, scope, minID, maxID)
 
 	identities := map[identity.NumericIdentity]*identity.Identity{}
 
@@ -62,7 +65,7 @@ func TestLocalIdentityCache(t *testing.T) {
 		require.NoError(t, err)
 
 		// The returned identity must be identical
-		require.EqualValues(t, identities[id.ID], id)
+		require.Equal(t, identities[id.ID], id)
 	}
 
 	// Allocation must fail as we are out of IDs
@@ -106,21 +109,22 @@ func TestLocalIdentityCache(t *testing.T) {
 }
 
 func TestOldNID(t *testing.T) {
+	logger := hivetest.Logger(t)
 	minID, maxID := identity.NumericIdentity(1), identity.NumericIdentity(10)
 	scope := identity.NumericIdentity(0x42_00_00_00)
-	c := newLocalIdentityCache(scope, minID, maxID)
+	c := newLocalIdentityCache(logger, scope, minID, maxID)
 
 	// Request identity, it should work
 	l := labels.GetCIDRLabels(netip.MustParsePrefix("1.1.1.1/32"))
 	id, _, _ := c.lookupOrCreate(l, scope)
 	assert.NotNil(t, id)
-	assert.EqualValues(t, scope, id.ID)
+	assert.Equal(t, scope, id.ID)
 
 	// Re-request identity, it should not
 	l = labels.GetCIDRLabels(netip.MustParsePrefix("1.1.1.2/32"))
 	id, _, _ = c.lookupOrCreate(l, scope)
 	assert.NotNil(t, id)
-	assert.EqualValues(t, scope+1, id.ID)
+	assert.Equal(t, scope+1, id.ID)
 
 	// Withhold the next identity, it should be skipped
 	c.withhold([]identity.NumericIdentity{scope + 2})
@@ -128,19 +132,19 @@ func TestOldNID(t *testing.T) {
 	l = labels.GetCIDRLabels(netip.MustParsePrefix("1.1.1.3/32"))
 	id, _, _ = c.lookupOrCreate(l, 0)
 	assert.NotNil(t, id)
-	assert.EqualValues(t, scope+3, id.ID)
+	assert.Equal(t, scope+3, id.ID)
 
 	// Request a withheld identity, it should succeed
 	l = labels.GetCIDRLabels(netip.MustParsePrefix("1.1.1.4/32"))
 	id2, _, _ := c.lookupOrCreate(l, scope+2)
 	assert.NotNil(t, id2)
-	assert.EqualValues(t, scope+2, id2.ID)
+	assert.Equal(t, scope+2, id2.ID)
 
 	// Request a withheld and allocated identity, it should be ignored
 	l = labels.GetCIDRLabels(netip.MustParsePrefix("1.1.1.5/32"))
 	id, _, _ = c.lookupOrCreate(l, scope+2)
 	assert.NotNil(t, id)
-	assert.EqualValues(t, scope+4, id.ID)
+	assert.Equal(t, scope+4, id.ID)
 
 	// Unwithhold and release an identity, requesting should now succeed
 	c.unwithhold([]identity.NumericIdentity{scope + 2})
@@ -148,13 +152,13 @@ func TestOldNID(t *testing.T) {
 	l = labels.GetCIDRLabels(netip.MustParsePrefix("1.1.1.6/32"))
 	id, _, _ = c.lookupOrCreate(l, scope+2)
 	assert.NotNil(t, id)
-	assert.EqualValues(t, scope+2, id.ID)
+	assert.Equal(t, scope+2, id.ID)
 
 	// Request an identity out of scope, it should not be honored
 	l = labels.GetCIDRLabels(netip.MustParsePrefix("1.1.1.7/32"))
 	id, _, _ = c.lookupOrCreate(l, scope-2)
 	assert.NotNil(t, id)
-	assert.EqualValues(t, scope+5, id.ID)
+	assert.Equal(t, scope+5, id.ID)
 
 	// Withhold all identities; allocator should fall back to a (random) withheld identity
 	c.withhold([]identity.NumericIdentity{scope + 6, scope + 7, scope + 8, scope + 9, scope + 10})
@@ -167,9 +171,10 @@ func TestOldNID(t *testing.T) {
 }
 
 func TestObserve(t *testing.T) {
+	logger := hivetest.Logger(t)
 	minID, maxID := identity.NumericIdentity(1), identity.NumericIdentity(10)
 	scope := identity.NumericIdentity(0x42_00_00_00)
-	c := newLocalIdentityCache(scope, minID, maxID)
+	c := newLocalIdentityCache(logger, scope, minID, maxID)
 
 	tctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	t.Cleanup(cancel)
@@ -199,7 +204,7 @@ func TestObserve(t *testing.T) {
 	l := labels.GetCIDRLabels(netip.MustParsePrefix("1.1.1.1/32"))
 	id, _, _ := c.lookupOrCreate(l, scope)
 	assert.NotNil(t, id)
-	assert.EqualValues(t, scope, id.ID)
+	assert.Equal(t, scope, id.ID)
 
 	e := <-ev
 	assert.Empty(t, ev)

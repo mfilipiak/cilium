@@ -7,7 +7,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/cilium/cilium/pkg/byteorder"
 	"github.com/cilium/cilium/pkg/identity"
@@ -15,17 +14,34 @@ import (
 )
 
 const (
-	DropNotifyVersion0 = 0
-	DropNotifyVersion1 = 1
+	DropNotifyVersion0 = iota
+	DropNotifyVersion1
+	DropNotifyVersion2
+)
 
-	// DropNotifyV1Len is the amount of packet data provided in a v1 drop notification.
-	DropNotifyV1Len = 36
+const (
+	// dropNotifyV1Len is the amount of packet data provided in a v0/v1 drop notification.
+	dropNotifyV1Len = 36
+	// dropNotifyV2Len is the amount of packet data provided in a v2 drop notification.
+	dropNotifyV2Len = 40
+)
+
+const (
+	// DropNotifyFlagIsIPv6 is set in DropNotify.Flags when it refers to an IPv6 flow.
+	DropNotifyFlagIsIPv6 uint8 = 1 << iota
+	// DropNotifyFlagIsL3Device is set in DropNotify.Flags when it refers to a L3 device.
+	DropNotifyFlagIsL3Device
+	// DropNotifyFlagIsVXLAN is set in DropNotify.Flags when it refers to an overlay VXLAN packet.
+	DropNotifyFlagIsVXLAN
+	// DropNotifyFlagIsGeneve is set in DropNotify.Flags when it refers to an overlay Geneve packet.
+	DropNotifyFlagIsGeneve
 )
 
 var (
 	dropNotifyLengthFromVersion = map[uint16]uint{
-		DropNotifyVersion0: DropNotifyV1Len, // retain backwards compatibility for testing.
-		DropNotifyVersion1: DropNotifyV1Len,
+		DropNotifyVersion0: dropNotifyV1Len, // retain backwards compatibility for testing.
+		DropNotifyVersion1: dropNotifyV1Len,
+		DropNotifyVersion2: dropNotifyV2Len,
 	}
 )
 
@@ -45,12 +61,37 @@ type DropNotify struct {
 	File     uint8
 	ExtError int8
 	Ifindex  uint32
+	Flags    uint8
+	_        [3]uint8
 	// data
+}
+
+// Dump prints the message according to the verbosity level specified
+func (dn *DropNotify) Dump(args *api.DumpArgs) {
+	switch args.Verbosity {
+	case api.INFO, api.DEBUG:
+		dn.DumpInfo(args.Buf, args.Data, args.Format)
+	case api.JSON:
+		dn.DumpJSON(args.Buf, args.Data, args.CpuPrefix)
+	default:
+		fmt.Fprintln(args.Buf, msgSeparator)
+		dn.DumpVerbose(args.Buf, !args.Dissect, args.Data, args.CpuPrefix, args.Format)
+	}
+}
+
+// GetSrc retrieves the source endpoint for the message.
+func (n *DropNotify) GetSrc() uint16 {
+	return n.Source
+}
+
+// GetDst retrieves the destination endpoint for the message.
+func (n *DropNotify) GetDst() uint16 {
+	return uint16(n.DstID)
 }
 
 // dumpIdentity dumps the source and destination identities in numeric or
 // human-readable format.
-func (n *DropNotify) dumpIdentity(buf *bufio.Writer, numeric DisplayFormat) {
+func (n *DropNotify) dumpIdentity(buf *bufio.Writer, numeric api.DisplayFormat) {
 	if numeric {
 		fmt.Fprintf(buf, ", identity %d->%d", n.SrcLabel, n.DstLabel)
 	} else {
@@ -58,23 +99,35 @@ func (n *DropNotify) dumpIdentity(buf *bufio.Writer, numeric DisplayFormat) {
 	}
 }
 
-// DecodeDropNotify will decode 'data' into the provided DropNotify structure
-func DecodeDropNotify(data []byte, dn *DropNotify) error {
-	return dn.decodeDropNotify(data)
-}
-
-func (n *DropNotify) decodeDropNotify(data []byte) error {
-	if l := len(data); l < DropNotifyV1Len {
-		return fmt.Errorf("unexpected DropNotify data length, expected %d but got %d", DropNotifyV1Len, l)
+// Decode decodes the message in 'data' into the struct.
+func (n *DropNotify) Decode(data []byte) error {
+	if l := len(data); l < dropNotifyV1Len {
+		return fmt.Errorf("unexpected DropNotify data length, expected at least %d but got %d", dropNotifyV1Len, l)
 	}
 
+	version := byteorder.Native.Uint16(data[14:16])
+
+	// Check against max version.
+	if version > DropNotifyVersion2 {
+		return fmt.Errorf("Unrecognized drop event (version %d)", version)
+	}
+
+	// Decode logic for version >= v2.
+	if version >= DropNotifyVersion2 {
+		if l := len(data); l < dropNotifyV2Len {
+			return fmt.Errorf("unexpected DropNotify data length (version %d), expected at least %d but got %d", version, dropNotifyV2Len, l)
+		}
+		n.Flags = data[36]
+	}
+
+	// Decode logic for version >= v0/v1.
 	n.Type = data[0]
 	n.SubType = data[1]
 	n.Source = byteorder.Native.Uint16(data[2:4])
 	n.Hash = byteorder.Native.Uint32(data[4:8])
 	n.OrigLen = byteorder.Native.Uint32(data[8:12])
 	n.CapLen = byteorder.Native.Uint16(data[12:14])
-	n.Version = byteorder.Native.Uint16(data[14:16])
+	n.Version = version
 	n.SrcLabel = identity.NumericIdentity(byteorder.Native.Uint32(data[16:20]))
 	n.DstLabel = identity.NumericIdentity(byteorder.Native.Uint32(data[20:24]))
 	n.DstID = byteorder.Native.Uint32(data[24:28])
@@ -86,6 +139,26 @@ func (n *DropNotify) decodeDropNotify(data []byte) error {
 	return nil
 }
 
+// IsL3Device returns true if the trace comes from an L3 device.
+func (n *DropNotify) IsL3Device() bool {
+	return n.Flags&DropNotifyFlagIsL3Device != 0
+}
+
+// IsIPv6 returns true if the trace refers to an IPv6 packet.
+func (n *DropNotify) IsIPv6() bool {
+	return n.Flags&DropNotifyFlagIsIPv6 != 0
+}
+
+// IsGeneve returns true if the trace refers to an overlay Geneve packet.
+func (n *DropNotify) IsGeneve() bool {
+	return n.Flags&DropNotifyFlagIsGeneve != 0
+}
+
+// IsVXLAN returns true if the trace refers to an overlay VXLAN packet.
+func (n *DropNotify) IsVXLAN() bool {
+	return n.Flags&DropNotifyFlagIsVXLAN != 0
+}
+
 // DataOffset returns the offset from the beginning of DropNotify where the
 // notification data begins.
 //
@@ -95,18 +168,15 @@ func (n *DropNotify) DataOffset() uint {
 }
 
 // DumpInfo prints a summary of the drop messages.
-func (n *DropNotify) DumpInfo(data []byte, numeric DisplayFormat) {
-	buf := bufio.NewWriter(os.Stdout)
+func (n *DropNotify) DumpInfo(buf *bufio.Writer, data []byte, numeric api.DisplayFormat) {
 	fmt.Fprintf(buf, "xx drop (%s) flow %#x to endpoint %d, ifindex %d, file %s:%d, ",
 		api.DropReasonExt(n.SubType, n.ExtError), n.Hash, n.DstID, n.Ifindex, api.BPFFileName(n.File), int(n.Line))
 	n.dumpIdentity(buf, numeric)
-	fmt.Fprintf(buf, ": %s\n", GetConnectionSummary(data[n.DataOffset():]))
-	buf.Flush()
+	fmt.Fprintf(buf, ": %s\n", GetConnectionSummary(data[n.DataOffset():], &decodeOpts{n.IsL3Device(), n.IsIPv6(), n.IsVXLAN(), n.IsGeneve()}))
 }
 
 // DumpVerbose prints the drop notification in human readable form
-func (n *DropNotify) DumpVerbose(dissect bool, data []byte, prefix string, numeric DisplayFormat) {
-	buf := bufio.NewWriter(os.Stdout)
+func (n *DropNotify) DumpVerbose(buf *bufio.Writer, dissect bool, data []byte, prefix string, numeric api.DisplayFormat) {
 	fmt.Fprintf(buf, "%s MARK %#x FROM %d DROP: %d bytes, reason %s",
 		prefix, n.Hash, n.Source, n.OrigLen, api.DropReasonExt(n.SubType, n.ExtError))
 
@@ -121,9 +191,8 @@ func (n *DropNotify) DumpVerbose(dissect bool, data []byte, prefix string, numer
 	}
 
 	if offset := int(n.DataOffset()); n.CapLen > 0 && len(data) > offset {
-		Dissect(dissect, data[offset:])
+		Dissect(buf, dissect, data[offset:], &decodeOpts{n.IsL3Device(), n.IsIPv6(), n.IsVXLAN(), n.IsGeneve()})
 	}
-	buf.Flush()
 }
 
 func (n *DropNotify) getJSON(data []byte, cpuPrefix string) (string, error) {
@@ -131,7 +200,7 @@ func (n *DropNotify) getJSON(data []byte, cpuPrefix string) (string, error) {
 	v := DropNotifyToVerbose(n)
 	v.CPUPrefix = cpuPrefix
 	if offset := int(n.DataOffset()); n.CapLen > 0 && len(data) > offset {
-		v.Summary = GetDissectSummary(data[offset:])
+		v.Summary = GetDissectSummary(data[offset:], &decodeOpts{n.IsL3Device(), n.IsIPv6(), n.IsVXLAN(), n.IsGeneve()})
 	}
 
 	ret, err := json.Marshal(v)
@@ -139,10 +208,10 @@ func (n *DropNotify) getJSON(data []byte, cpuPrefix string) (string, error) {
 }
 
 // DumpJSON prints notification in json format
-func (n *DropNotify) DumpJSON(data []byte, cpuPrefix string) {
+func (n *DropNotify) DumpJSON(buf *bufio.Writer, data []byte, cpuPrefix string) {
 	resp, err := n.getJSON(data, cpuPrefix)
 	if err == nil {
-		fmt.Println(resp)
+		fmt.Fprintln(buf, resp)
 	}
 }
 

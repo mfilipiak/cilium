@@ -14,14 +14,15 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
 
 	"github.com/cilium/cilium/pkg/bpf"
+	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/datapath/loader/metrics"
 	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/defaults"
-	"github.com/cilium/cilium/pkg/maps/callsmap"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/testutils"
 )
@@ -102,57 +103,54 @@ func testReloadDatapath(t *testing.T, ep *testutils.TestEndpoint) {
 	require.NoError(t, err)
 }
 
-// TestCompileOrLoadDefaultEndpoint checks that the datapath can be compiled
+// TestPrivilegedCompileOrLoadDefaultEndpoint checks that the datapath can be compiled
 // and loaded.
-func TestCompileOrLoadDefaultEndpoint(t *testing.T) {
-	ep := testutils.NewTestEndpoint()
+func TestPrivilegedCompileOrLoadDefaultEndpoint(t *testing.T) {
+	ep := testutils.NewTestEndpoint(t)
 	initEndpoint(t, &ep)
 	testReloadDatapath(t, &ep)
 }
 
-// TestCompileOrLoadHostEndpoint is the same as
+// TestPrivilegedCompileOrLoadHostEndpoint is the same as
 // TestCompileAndLoadDefaultEndpoint, but for the host endpoint.
-func TestCompileOrLoadHostEndpoint(t *testing.T) {
-
-	callsmap.HostMapName = fmt.Sprintf("test_%s", callsmap.MapName)
-	callsmap.NetdevMapName = fmt.Sprintf("test_%s", callsmap.MapName)
-
-	hostEp := testutils.NewTestHostEndpoint()
+func TestPrivilegedCompileOrLoadHostEndpoint(t *testing.T) {
+	hostEp := testutils.NewTestHostEndpoint(t)
 	initEndpoint(t, &hostEp)
 
 	testReloadDatapath(t, &hostEp)
 }
 
-// TestReload compiles and attaches the datapath.
-func TestReload(t *testing.T) {
+// TestPrivilegedReload compiles and attaches the datapath.
+func TestPrivilegedReload(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
 	defer cancel()
 
-	ep := testutils.NewTestEndpoint()
+	ep := testutils.NewTestEndpoint(t)
 	initEndpoint(t, &ep)
 
 	dirInfo := getEpDirs(&ep)
-	err := compileDatapath(ctx, dirInfo, false, log)
+	logger := hivetest.Logger(t)
+	err := compileDatapath(ctx, logger, dirInfo, false)
 	require.NoError(t, err)
 
-	l, err := netlink.LinkByName(ep.InterfaceName())
+	l, err := safenetlink.LinkByName(ep.InterfaceName())
 	require.NoError(t, err)
 
 	objPath := fmt.Sprintf("%s/%s", dirInfo.Output, endpointObj)
 	tmp := testutils.TempBPFFS(t)
 
 	for range 2 {
-		spec, err := bpf.LoadCollectionSpec(objPath)
+		spec, err := bpf.LoadCollectionSpec(logger, objPath)
 		require.NoError(t, err)
 
-		coll, commit, err := bpf.LoadCollection(spec, &bpf.CollectionOptions{
+		coll, commit, err := bpf.LoadCollection(logger, spec, &bpf.CollectionOptions{
 			CollectionOptions: ebpf.CollectionOptions{Maps: ebpf.MapOptions{PinPath: tmp}},
 		})
 		require.NoError(t, err)
 
-		require.NoError(t, attachSKBProgram(l, coll.Programs[symbolFromEndpoint],
+		require.NoError(t, attachSKBProgram(logger, l, coll.Programs[symbolFromEndpoint],
 			symbolFromEndpoint, tmp, netlink.HANDLE_MIN_INGRESS, true))
-		require.NoError(t, attachSKBProgram(l, coll.Programs[symbolToEndpoint],
+		require.NoError(t, attachSKBProgram(logger, l, coll.Programs[symbolToEndpoint],
 			symbolToEndpoint, tmp, netlink.HANDLE_MIN_EGRESS, true))
 
 		require.NoError(t, commit())
@@ -186,18 +184,18 @@ func testCompileFailure(t *testing.T, ep *testutils.TestEndpoint) {
 	require.Error(t, err)
 }
 
-// TestCompileFailureDefaultEndpoint attempts to compile then cancels the
+// TestPrivilegedCompileFailureDefaultEndpoint attempts to compile then cancels the
 // context and ensures that the failure paths may be hit.
-func TestCompileFailureDefaultEndpoint(t *testing.T) {
-	ep := testutils.NewTestEndpoint()
+func TestPrivilegedCompileFailureDefaultEndpoint(t *testing.T) {
+	ep := testutils.NewTestEndpoint(t)
 	initEndpoint(t, &ep)
 	testCompileFailure(t, &ep)
 }
 
-// TestCompileFailureHostEndpoint is the same as
-// TestCompileFailureDefaultEndpoint, but for the host endpoint.
-func TestCompileFailureHostEndpoint(t *testing.T) {
-	hostEp := testutils.NewTestHostEndpoint()
+// TestPrivilegedCompileFailureHostEndpoint is the same as
+// TestPrivilegedCompileFailureDefaultEndpoint, but for the host endpoint.
+func TestPrivilegedCompileFailureHostEndpoint(t *testing.T) {
+	hostEp := testutils.NewTestHostEndpoint(t)
 	initEndpoint(t, &hostEp)
 	testCompileFailure(t, &hostEp)
 }
@@ -260,10 +258,10 @@ func BenchmarkCompileOnly(b *testing.B) {
 
 	dirInfo := getDirs(b)
 	option.Config.Debug = true
+	logger := hivetest.Logger(b)
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if err := compileDatapath(ctx, dirInfo, false, log); err != nil {
+	for b.Loop() {
+		if err := compileDatapath(ctx, logger, dirInfo, false); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -271,30 +269,31 @@ func BenchmarkCompileOnly(b *testing.B) {
 
 // BenchmarkReplaceDatapath compiles the datapath program, then benchmarks only
 // the loading of the program into the kernel.
-func BenchmarkReplaceDatapath(b *testing.B) {
+func BenchmarkPrivilegedReplaceDatapath(b *testing.B) {
 	ctx, cancel := context.WithTimeout(context.Background(), benchTimeout)
 	defer cancel()
 
 	tmp := testutils.TempBPFFS(b)
 
-	ep := testutils.NewTestEndpoint()
+	ep := testutils.NewTestEndpoint(b)
 	initEndpoint(b, &ep)
 
 	dirInfo := getEpDirs(&ep)
 
-	if err := compileDatapath(ctx, dirInfo, false, log); err != nil {
+	logger := hivetest.Logger(b)
+	if err := compileDatapath(ctx, logger, dirInfo, false); err != nil {
 		b.Fatal(err)
 	}
 
 	objPath := fmt.Sprintf("%s/%s", dirInfo.Output, endpointObj)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		spec, err := bpf.LoadCollectionSpec(objPath)
+
+	for b.Loop() {
+		spec, err := bpf.LoadCollectionSpec(logger, objPath)
 		if err != nil {
 			b.Fatal(err)
 		}
 
-		coll, commit, err := bpf.LoadCollection(spec, &bpf.CollectionOptions{
+		coll, commit, err := bpf.LoadCollection(logger, spec, &bpf.CollectionOptions{
 			CollectionOptions: ebpf.CollectionOptions{Maps: ebpf.MapOptions{PinPath: tmp}},
 		})
 		if err != nil {

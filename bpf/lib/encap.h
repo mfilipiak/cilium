@@ -8,25 +8,13 @@
 #include "hash.h"
 #include "trace.h"
 
-#if __ctx_is == __ctx_skb
-#include "encrypt.h"
-#endif /* __ctx_is == __ctx_skb */
-
 #ifdef HAVE_ENCAP
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, struct tunnel_key);
-	__type(value, struct tunnel_value);
-	__uint(pinning, LIBBPF_PIN_BY_NAME);
-	__uint(max_entries, TUNNEL_ENDPOINT_MAP_SIZE);
-	__uint(map_flags, CONDITIONAL_PREALLOC);
-} TUNNEL_MAP __section_maps_btf;
-
 static __always_inline int
-__encap_with_nodeid(struct __ctx_buff *ctx, __u32 src_ip, __be16 src_port,
-		    __be32 tunnel_endpoint,
-		    __u32 seclabel, __u32 dstid, __u32 vni,
-		    enum trace_reason ct_reason, __u32 monitor, int *ifindex)
+__encap_with_nodeid4(struct __ctx_buff *ctx, __u32 src_ip, __be16 src_port,
+		     __be32 tunnel_endpoint,
+		     __u32 seclabel, __u32 dstid, __u32 vni,
+		     enum trace_reason ct_reason, __u32 monitor, int *ifindex,
+		     __be16 proto)
 {
 	/* When encapsulating, a packet originating from the local host is
 	 * being considered as a packet from a remote node as it is being
@@ -44,24 +32,54 @@ __encap_with_nodeid(struct __ctx_buff *ctx, __u32 src_ip, __be16 src_port,
 #endif
 
 	send_trace_notify(ctx, TRACE_TO_OVERLAY, seclabel, dstid, TRACE_EP_ID_UNKNOWN,
-			  *ifindex, ct_reason, monitor);
+			  *ifindex, ct_reason, monitor, proto);
 
-	return ctx_set_encap_info(ctx, src_ip, src_port, tunnel_endpoint, seclabel, vni,
-				  NULL, 0);
+	return ctx_set_encap_info4(ctx, src_ip, src_port, tunnel_endpoint, seclabel, vni,
+				   NULL, 0);
+}
+
+static __always_inline int
+__encap_with_nodeid6(struct __ctx_buff *ctx, const union v6addr *tunnel_endpoint,
+		     __u32 seclabel, __u32 dstid, enum trace_reason ct_reason,
+		     __u32 monitor, int *ifindex, __be16 proto)
+{
+	/* When encapsulating, a packet originating from the local host is
+	 * being considered as a packet from a remote node as it is being
+	 * received.
+	 */
+	if (seclabel == HOST_ID)
+		seclabel = LOCAL_NODE_ID;
+
+#if __ctx_is == __ctx_skb
+	*ifindex = ENCAP_IFINDEX;
+#else
+	*ifindex = 0;
+#endif
+
+	send_trace_notify(ctx, TRACE_TO_OVERLAY, seclabel, dstid, TRACE_EP_ID_UNKNOWN,
+			  *ifindex, ct_reason, monitor, proto);
+
+	return ctx_set_encap_info6(ctx, tunnel_endpoint, seclabel, NULL, 0);
 }
 
 static __always_inline int
 __encap_and_redirect_with_nodeid(struct __ctx_buff *ctx,
-				 __be32 tunnel_endpoint,
+				 const struct remote_endpoint_info *info,
 				 __u32 seclabel, __u32 dstid, __u32 vni,
-				 const struct trace_ctx *trace)
+				 const struct trace_ctx *trace, __be16 proto)
 {
 	int ifindex;
 	int ret = 0;
 
-	ret = __encap_with_nodeid(ctx, 0, 0, tunnel_endpoint, seclabel, dstid,
-				  vni, trace->reason, trace->monitor,
-				  &ifindex);
+	if (info->flag_ipv6_tunnel_ep)
+		ret = __encap_with_nodeid6(ctx, &info->tunnel_endpoint.ip6,
+					   seclabel, dstid, trace->reason,
+					   trace->monitor, &ifindex, proto);
+	else
+		ret = __encap_with_nodeid4(ctx, 0, 0,
+					   info->tunnel_endpoint.ip4, seclabel,
+					   dstid, vni, trace->reason,
+					   trace->monitor, &ifindex, proto);
 	if (ret != CTX_ACT_REDIRECT)
 		return ret;
 
@@ -70,60 +88,27 @@ __encap_and_redirect_with_nodeid(struct __ctx_buff *ctx,
 	return ctx_redirect(ctx, ifindex, 0);
 }
 
-/* encap_and_redirect_with_nodeid returns CTX_ACT_OK after ctx meta-data is
- * set. Caller should pass the ctx to the stack at this point. Otherwise
- * returns CTX_ACT_REDIRECT on successful redirect to tunnel device.
- * On error returns a DROP_* reason.
+/* encap_and_redirect_with_nodeid returns CTX_ACT_REDIRECT on successful
+ * redirect to tunnel device. On error returns a DROP_* reason.
  */
 static __always_inline int
-encap_and_redirect_with_nodeid(struct __ctx_buff *ctx, __be32 tunnel_endpoint,
-			       __u8 encrypt_key __maybe_unused,
+encap_and_redirect_with_nodeid(struct __ctx_buff *ctx,
+			       struct remote_endpoint_info *info,
 			       __u32 seclabel, __u32 dstid,
-			       const struct trace_ctx *trace)
+			       const struct trace_ctx *trace,
+			       __be16 proto)
 {
-#ifdef ENABLE_IPSEC
-	if (encrypt_key)
-		return set_ipsec_encrypt(ctx, encrypt_key, tunnel_endpoint,
-					 seclabel, true, false);
-#endif
-
-	return __encap_and_redirect_with_nodeid(ctx, tunnel_endpoint,
-						seclabel, dstid, NOT_VTEP_DST,
-						trace);
-}
-
-/* __encap_and_redirect_lxc() is a variant of encap_and_redirect_lxc()
- * that requires a valid tunnel_endpoint.
- */
-static __always_inline int
-__encap_and_redirect_lxc(struct __ctx_buff *ctx, __be32 tunnel_endpoint,
-			 __u8 encrypt_key, __u32 seclabel, __u32 dstid,
-			 const struct trace_ctx *trace)
-{
-	return encap_and_redirect_with_nodeid(ctx, tunnel_endpoint,
-					      encrypt_key, seclabel, dstid,
-					      trace);
+	return __encap_and_redirect_with_nodeid(ctx, info, seclabel, dstid,
+						NOT_VTEP_DST, trace, proto);
 }
 
 #if defined(TUNNEL_MODE)
-/* encap_and_redirect_lxc adds IPSec metadata (if enabled) and returns the packet
- * so that it can be passed to the IP stack. Without IPSec the packet is
- * typically redirected to the output tunnel device and ctx will not be seen by
- * the IP stack.
- *
- * Returns CTX_ACT_OK when ctx needs to be handed to IP stack (eg. for IPSec
- * handling), a DROP_* reason on error, and finally on successful redirect returns
- * CTX_ACT_REDIRECT.
+/* encap_and_redirect_lxc returns CTX_ACT_REDIRECT on successful redirect, and
+ * a DROP_* reason on error.
  */
 static __always_inline int
-encap_and_redirect_lxc(struct __ctx_buff *ctx,
-		       __be32 tunnel_endpoint __maybe_unused,
-		       __u32 src_ip __maybe_unused,
-		       __u32 dst_ip __maybe_unused,
-		       __u8 encrypt_key __maybe_unused,
-		       struct tunnel_key *key __maybe_unused,
-		       __u32 seclabel, __u32 dstid,
-		       const struct trace_ctx *trace)
+encap_and_redirect_lxc(struct __ctx_buff *ctx, struct remote_endpoint_info *info,
+		       __u32 seclabel, __u32 dstid, const struct trace_ctx *trace, __be16 proto)
 {
 	struct tunnel_value *tunnel __maybe_unused;
 	struct bpf_tunnel_key tunnel_key __maybe_unused = {};
@@ -136,11 +121,8 @@ encap_and_redirect_lxc(struct __ctx_buff *ctx,
 		printk("encrypt_key: %i", encrypt_key);
 		printk("seclabel: %i", seclabel);
 		printk("dstid: %i", dstid);
-		return __encap_and_redirect_lxc(ctx, tunnel_endpoint,
-						encrypt_key, seclabel, dstid,
-						trace);
+		return encap_and_redirect_with_nodeid(ctx, info, seclabel, dstid, trace, proto);
 	}
-
 	printk("nope: %i", dst_ip);
 	tunnel = map_lookup_elem(&TUNNEL_MAP, key);
 	if (!tunnel) {
@@ -172,32 +154,7 @@ encap_and_redirect_lxc(struct __ctx_buff *ctx,
 		return DROP_NO_TUNNEL_ENDPOINT;
 	}
 	printk("tunnel is: %u.%u.%u", (tunnel->ip4 & 0xff0000) >> 16, (tunnel->ip4 & 0xff00) >> 8, tunnel->ip4 & 0xff);
-
-# ifdef ENABLE_IPSEC
-	if (tunnel->key) {
-		__u8 min_encrypt_key = get_min_encrypt_key(tunnel->key);
-
-		return set_ipsec_encrypt(ctx, min_encrypt_key, tunnel->ip4,
-					 seclabel, false, false);
-	}
-# endif
-	return __encap_and_redirect_with_nodeid(ctx, tunnel->ip4, seclabel,
-						dstid, NOT_VTEP_DST, trace);
-}
-
-static __always_inline int
-encap_and_redirect_netdev(struct __ctx_buff *ctx, struct tunnel_key *k,
-			  __u8 encrypt_key, __u32 seclabel,
-			  const struct trace_ctx *trace)
-{
-	struct tunnel_value *tunnel;
-
-	tunnel = map_lookup_elem(&TUNNEL_MAP, k);
-	if (!tunnel)
-		return DROP_NO_TUNNEL_ENDPOINT;
-
-	return encap_and_redirect_with_nodeid(ctx, tunnel->ip4, encrypt_key,
-					      seclabel, 0, trace);
+	return encap_and_redirect_with_nodeid(ctx, info, seclabel, dstid, trace, proto);
 }
 #endif /* TUNNEL_MODE */
 
@@ -227,12 +184,12 @@ tunnel_gen_src_port_v6(struct ipv6_ct_tuple *tuple __maybe_unused)
 
 #if defined(ENABLE_DSR) && DSR_ENCAP_MODE == DSR_ENCAP_GENEVE
 static __always_inline int
-__encap_with_nodeid_opt(struct __ctx_buff *ctx, __u32 src_ip, __be16 src_port,
-			__u32 tunnel_endpoint,
-			__u32 seclabel, __u32 dstid, __u32 vni,
-			void *opt, __u32 opt_len,
-			enum trace_reason ct_reason,
-			__u32 monitor, int *ifindex)
+__encap_with_nodeid_opt4(struct __ctx_buff *ctx, __u32 src_ip, __be16 src_port,
+			 __u32 tunnel_endpoint,
+			 __u32 seclabel, __u32 dstid, __u32 vni,
+			 void *opt, __u32 opt_len,
+			 enum trace_reason ct_reason,
+			 __u32 monitor, int *ifindex, __be16 proto)
 {
 	/* When encapsulating, a packet originating from the local host is
 	 * being considered as a packet from a remote node as it is being
@@ -250,10 +207,36 @@ __encap_with_nodeid_opt(struct __ctx_buff *ctx, __u32 src_ip, __be16 src_port,
 #endif
 
 	send_trace_notify(ctx, TRACE_TO_OVERLAY, seclabel, dstid, TRACE_EP_ID_UNKNOWN,
-			  *ifindex, ct_reason, monitor);
+			  *ifindex, ct_reason, monitor, proto);
 
-	return ctx_set_encap_info(ctx, src_ip, src_port, tunnel_endpoint, seclabel, vni, opt,
-				  opt_len);
+	return ctx_set_encap_info4(ctx, src_ip, src_port, tunnel_endpoint, seclabel, vni, opt,
+				   opt_len);
+}
+
+static __always_inline int
+__encap_with_nodeid_opt6(struct __ctx_buff *ctx,
+			 const union v6addr *tunnel_endpoint, __u32 seclabel,
+			 __u32 dstid, void *opt, __u32 opt_len,
+			 enum trace_reason ct_reason, __u32 monitor,
+			 int *ifindex, __be16 proto)
+{
+	/* When encapsulating, a packet originating from the local host is
+	 * being considered as a packet from a remote node as it is being
+	 * received.
+	 */
+	if (seclabel == HOST_ID)
+		seclabel = LOCAL_NODE_ID;
+
+#if __ctx_is == __ctx_skb
+	*ifindex = ENCAP_IFINDEX;
+#else
+	*ifindex = 0;
+#endif
+
+	send_trace_notify(ctx, TRACE_TO_OVERLAY, seclabel, dstid, TRACE_EP_ID_UNKNOWN,
+			  *ifindex, ct_reason, monitor, proto);
+
+	return ctx_set_encap_info6(ctx, tunnel_endpoint, seclabel, opt, opt_len);
 }
 
 static __always_inline void
@@ -280,4 +263,26 @@ set_geneve_dsr_opt6(__be16 port, const union v6addr *addr,
 	gopt->port = port;
 }
 #endif
+
+# if defined(ENABLE_IPV4) || defined(ENABLE_IPV6)
+static __always_inline int
+get_tunnel_key(struct __ctx_buff *ctx, struct bpf_tunnel_key *key)
+{
+	__u32 key_size __maybe_unused = TUNNEL_KEY_WITHOUT_SRC_IP;
+	int ret __maybe_unused;
+
+#  ifdef ENABLE_IPV4
+	ret = ctx_get_tunnel_key(ctx, key, key_size, 0);
+	if (!ret)
+		return ret;
+#  endif /* ENABLE_IPV4 */
+#  ifdef ENABLE_IPV6
+	ret = ctx_get_tunnel_key(ctx, key, key_size, BPF_F_TUNINFO_IPV6);
+	if (!ret)
+		return ret;
+#  endif /* ENABLE_IPV6 */
+
+	return DROP_NO_TUNNEL_KEY;
+}
+# endif /* ENABLE_IPV4 || ENABLE_IPV6 */
 #endif /* HAVE_ENCAP */

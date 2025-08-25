@@ -32,10 +32,9 @@ var (
 
 		cell.Config(k8s.DefaultConfig),
 		cell.Provide(
-			k8s.ServiceResource,
 			mcsapi.ServiceExportResource,
-			k8s.EndpointsResource,
-			k8s.LBIPPoolsResource,
+			EndpointsResource,
+			LBIPPoolsResource,
 			k8s.CiliumIdentityResource,
 			k8s.CiliumPodIPPoolResource,
 			k8s.CiliumBGPPeeringPolicyResource,
@@ -62,7 +61,7 @@ type Resources struct {
 	Services             resource.Resource[*slim_corev1.Service]
 	ServiceExports       resource.Resource[*mcsapiv1alpha1.ServiceExport]
 	Endpoints            resource.Resource[*k8s.Endpoints]
-	LBIPPools            resource.Resource[*cilium_api_v2alpha1.CiliumLoadBalancerIPPool]
+	LBIPPools            resource.Resource[*cilium_api_v2.CiliumLoadBalancerIPPool]
 	Identities           resource.Resource[*cilium_api_v2.CiliumIdentity]
 	CiliumPodIPPools     resource.Resource[*cilium_api_v2alpha1.CiliumPodIPPool]
 	CiliumEndpoints      resource.Resource[*cilium_api_v2.CiliumEndpoint]
@@ -84,7 +83,7 @@ func HasCEWithIdentity(cepStore resource.Store[*cilium_api_v2.CiliumEndpoint], i
 }
 
 // podNodeNameIndexFunc indexes pods by node name.
-func PodNodeNameIndexFunc(obj interface{}) ([]string, error) {
+func PodNodeNameIndexFunc(obj any) ([]string, error) {
 	pod := obj.(*slim_corev1.Pod)
 	if pod.Spec.NodeName != "" {
 		return []string{pod.Spec.NodeName}, nil

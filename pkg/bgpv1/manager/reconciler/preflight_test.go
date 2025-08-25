@@ -118,8 +118,8 @@ func TestPreflightReconciler(t *testing.T) {
 			// later
 			originalServer := testSC.Server
 			t.Cleanup(func() {
-				originalServer.Stop() // stop our test server
-				testSC.Server.Stop()  // stop any recreated server
+				originalServer.Stop(context.Background(), types.StopRequest{FullDestroy: true}) // stop our test server
+				testSC.Server.Stop(context.Background(), types.StopRequest{FullDestroy: true})  // stop any recreated server
 			})
 
 			// attach original config
@@ -144,7 +144,7 @@ func TestPreflightReconciler(t *testing.T) {
 
 			// Run the reconciler twice to ensure idempotency. This
 			// simulates the retrying behavior of the controller.
-			for i := 0; i < 2; i++ {
+			for range 2 {
 				t.Run(tt.name, func(t *testing.T) {
 					err = preflightReconciler.Reconcile(context.Background(), params)
 					if (tt.err == nil) != (err == nil) {
@@ -218,8 +218,8 @@ func TestReconcileAfterServerReinit(t *testing.T) {
 
 	originalServer := testSC.Server
 	t.Cleanup(func() {
-		originalServer.Stop() // stop our test server
-		testSC.Server.Stop()  // stop any recreated server
+		originalServer.Stop(context.Background(), types.StopRequest{FullDestroy: true}) // stop our test server
+		testSC.Server.Stop(context.Background(), types.StopRequest{FullDestroy: true})  // stop any recreated server
 	})
 
 	// Validate pod CIDR and service announcements work as expected

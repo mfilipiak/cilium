@@ -5,8 +5,6 @@ package clustermesh
 
 import (
 	"context"
-	"reflect"
-	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,51 +15,29 @@ import (
 	"github.com/cilium/cilium/cilium-cli/k8s"
 )
 
-// Helper function to compare two slices of maps ignoring the order
-func equalClusterSlices(a, b []map[string]interface{}) bool {
-	if len(a) != len(b) {
-		return false
-	}
-
-	bCopy := make([]map[string]interface{}, len(b))
-	copy(bCopy, b)
-
-	return slices.EqualFunc(a, bCopy, func(m1, m2 map[string]interface{}) bool {
-		for i, bm := range bCopy {
-			if reflect.DeepEqual(m1, bm) {
-				bCopy = append(bCopy[:i], bCopy[i+1:]...)
-				return true
-			}
-		}
-		return false
-	})
-}
-
 func TestMergeClusters(t *testing.T) {
 	uu := map[string]struct {
-		oc            []map[string]interface{}
-		nc            []map[string]interface{}
+		oc            map[string]any
+		nc            map[string]any
 		exceptCluster string
 		err           error
-		e             map[string]interface{}
+		e             map[string]any
 	}{
 		"nil-new-one": {
-			oc: []map[string]interface{}{},
-			nc: []map[string]interface{}{
-				{
+			oc: map[string]any{},
+			nc: map[string]any{
+				"c3": map[string]any{
 					"ips":  []string{"172.19.0.6"},
-					"name": "c3",
 					"port": "32379",
 				},
 			},
-			e: map[string]interface{}{
-				"clustermesh": map[string]interface{}{
-					"config": map[string]interface{}{
+			e: map[string]any{
+				"clustermesh": map[string]any{
+					"config": map[string]any{
 						"enabled": true,
-						"clusters": []map[string]interface{}{
-							{
+						"clusters": map[string]any{
+							"c3": map[string]any{
 								"ips":  []string{"172.19.0.6"},
-								"name": "c3",
 								"port": "32379",
 							},
 						},
@@ -70,42 +46,36 @@ func TestMergeClusters(t *testing.T) {
 			},
 		},
 		"nil-new-some": {
-			oc: []map[string]interface{}{},
-			nc: []map[string]interface{}{
-				{
+			oc: map[string]any{},
+			nc: map[string]any{
+				"c3": map[string]any{
 					"ips":  []string{"172.19.0.6"},
-					"name": "c3",
 					"port": "32379",
 				},
-				{
+				"c2": map[string]any{
 					"ips":  []string{"172.19.0.7"},
-					"name": "c2",
 					"port": "32379",
 				},
-				{
+				"c1": map[string]any{
 					"ips":  []string{"172.19.0.8"},
-					"name": "c1",
 					"port": "32379",
 				},
 			},
-			e: map[string]interface{}{
-				"clustermesh": map[string]interface{}{
-					"config": map[string]interface{}{
+			e: map[string]any{
+				"clustermesh": map[string]any{
+					"config": map[string]any{
 						"enabled": true,
-						"clusters": []map[string]interface{}{
-							{
+						"clusters": map[string]any{
+							"c3": map[string]any{
 								"ips":  []string{"172.19.0.6"},
-								"name": "c3",
 								"port": "32379",
 							},
-							{
+							"c2": map[string]any{
 								"ips":  []string{"172.19.0.7"},
-								"name": "c2",
 								"port": "32379",
 							},
-							{
+							"c1": map[string]any{
 								"ips":  []string{"172.19.0.8"},
-								"name": "c1",
 								"port": "32379",
 							},
 						},
@@ -114,49 +84,45 @@ func TestMergeClusters(t *testing.T) {
 			},
 		},
 		"oc-new-some": {
-			oc: []map[string]interface{}{
-				{
+			oc: map[string]any{
+				"c2": map[string]any{
 					"ips":  []string{"172.19.0.5"},
-					"name": "c2",
-					"port": "32379"},
-				{
+					"port": "32379",
+				},
+				"c1": map[string]any{
 					"ips":  []string{"172.19.0.4"},
-					"name": "c1",
-					"port": "32379"},
+					"port": "32379",
+				},
 			},
-			nc: []map[string]interface{}{
-				{
+			nc: map[string]any{
+				"c3": map[string]any{
 					"ips":  []string{"172.19.0.6"},
-					"name": "c3",
 					"port": "32379",
 				},
-				{
+				"c4": map[string]any{
 					"ips":  []string{"172.19.0.7"},
-					"name": "c4",
 					"port": "32379",
 				},
 			},
-			e: map[string]interface{}{
-				"clustermesh": map[string]interface{}{
-					"config": map[string]interface{}{
+			e: map[string]any{
+				"clustermesh": map[string]any{
+					"config": map[string]any{
 						"enabled": true,
-						"clusters": []map[string]interface{}{
-							{
+						"clusters": map[string]any{
+							"c2": map[string]any{
 								"ips":  []string{"172.19.0.5"},
-								"name": "c2",
-								"port": "32379"},
-							{
-								"ips":  []string{"172.19.0.4"},
-								"name": "c1",
-								"port": "32379"},
-							{
-								"ips":  []string{"172.19.0.6"},
-								"name": "c3",
 								"port": "32379",
 							},
-							{
+							"c1": map[string]any{
+								"ips":  []string{"172.19.0.4"},
+								"port": "32379",
+							},
+							"c3": map[string]any{
+								"ips":  []string{"172.19.0.6"},
+								"port": "32379",
+							},
+							"c4": map[string]any{
 								"ips":  []string{"172.19.0.7"},
-								"name": "c4",
 								"port": "32379",
 							},
 						},
@@ -165,265 +131,246 @@ func TestMergeClusters(t *testing.T) {
 			},
 		},
 		"already-there": {
-			oc: []map[string]interface{}{
-				{
+			oc: map[string]any{
+				"c3": map[string]any{
 					"ips":  []string{"172.19.0.6"},
-					"name": "c3",
 					"port": "32379",
 				},
-				{
+				"c2": map[string]any{
 					"ips":  []string{"172.19.0.5"},
-					"name": "c2",
-					"port": "32379"},
-				{
+					"port": "32379",
+				},
+				"c1": map[string]any{
 					"ips":  []string{"172.19.0.4"},
-					"name": "c1",
-					"port": "32379"},
-			},
-			nc: []map[string]interface{}{
-				{
-					"ips":  []string{"172.19.0.6"},
-					"name": "c3",
 					"port": "32379",
 				},
 			},
-			e: map[string]interface{}{
-				"clustermesh": map[string]interface{}{
-					"config": map[string]interface{}{
+			nc: map[string]any{
+				"c3": map[string]any{
+					"ips":  []string{"172.19.0.6"},
+					"port": "32379",
+				},
+			},
+			e: map[string]any{
+				"clustermesh": map[string]any{
+					"config": map[string]any{
 						"enabled": true,
-						"clusters": []map[string]interface{}{
-							{
+						"clusters": map[string]any{
+							"c3": map[string]any{
 								"ips":  []string{"172.19.0.6"},
-								"name": "c3",
 								"port": "32379",
 							},
-							{
+							"c2": map[string]any{
 								"ips":  []string{"172.19.0.5"},
-								"name": "c2",
-								"port": "32379"},
-							{
+								"port": "32379",
+							},
+							"c1": map[string]any{
 								"ips":  []string{"172.19.0.4"},
-								"name": "c1",
-								"port": "32379"},
+								"port": "32379",
+							},
 						},
 					},
 				},
 			},
 		},
 		"already-there-partially": {
-			oc: []map[string]interface{}{
-				{
+			oc: map[string]any{
+				"c3": map[string]any{
 					"ips":  []string{"172.19.0.6"},
-					"name": "c3",
 					"port": "32379",
 				},
-				{
+				"c2": map[string]any{
 					"ips":  []string{"172.19.0.5"},
-					"name": "c2",
-					"port": "32379"},
-				{
+					"port": "32379",
+				},
+				"c1": map[string]any{
 					"ips":  []string{"172.19.0.4"},
-					"name": "c1",
-					"port": "32379"},
+					"port": "32379",
+				},
 			},
-			nc: []map[string]interface{}{
-				{
+			nc: map[string]any{
+				"c3": map[string]any{
 					"ips":  []string{"172.19.0.6"},
-					"name": "c3",
 					"port": "32379",
 				},
-				{
+				"c4": map[string]any{
 					"ips":  []string{"172.19.0.7"},
-					"name": "c4",
 					"port": "32379",
 				},
 			},
-			e: map[string]interface{}{
-				"clustermesh": map[string]interface{}{
-					"config": map[string]interface{}{
+			e: map[string]any{
+				"clustermesh": map[string]any{
+					"config": map[string]any{
 						"enabled": true,
-						"clusters": []map[string]interface{}{
-							{
+						"clusters": map[string]any{
+							"c3": map[string]any{
 								"ips":  []string{"172.19.0.6"},
-								"name": "c3",
 								"port": "32379",
 							},
-							{
+							"c2": map[string]any{
 								"ips":  []string{"172.19.0.5"},
-								"name": "c2",
-								"port": "32379"},
-							{
+								"port": "32379",
+							},
+							"c1": map[string]any{
 								"ips":  []string{"172.19.0.4"},
-								"name": "c1",
-								"port": "32379"},
-							{
+								"port": "32379",
+							},
+							"c4": map[string]any{
 								"ips":  []string{"172.19.0.7"},
-								"name": "c4",
-								"port": "32379"},
+								"port": "32379",
+							},
 						},
 					},
 				},
 			},
 		},
 		"except-nc-changed": {
-			oc: []map[string]interface{}{
-				{
+			oc: map[string]any{
+				"c3": map[string]any{
 					"ips":  []string{"172.19.0.6"},
-					"name": "c3",
 					"port": "32379",
 				},
-				{
+				"c2": map[string]any{
 					"ips":  []string{"172.19.0.5"},
-					"name": "c2",
-					"port": "32379"},
-				{
-					"ips":  []string{"172.19.0.4"},
-					"name": "c1",
-					"port": "32379"},
-			},
-			nc: []map[string]interface{}{
-				{
-					"ips":  []string{"172.19.0.8"},
-					"name": "c5",
 					"port": "32379",
 				},
-				{
+				"c1": map[string]any{
+					"ips":  []string{"172.19.0.4"},
+					"port": "32379",
+				},
+			},
+			nc: map[string]any{
+				"c5": map[string]any{
+					"ips":  []string{"172.19.0.8"},
+					"port": "32379",
+				},
+				"c4": map[string]any{
 					"ips":  []string{"172.19.0.7"},
-					"name": "c4",
 					"port": "32379",
 				},
 			},
 			exceptCluster: "c4",
-			e: map[string]interface{}{
-				"clustermesh": map[string]interface{}{
-					"config": map[string]interface{}{
+			e: map[string]any{
+				"clustermesh": map[string]any{
+					"config": map[string]any{
 						"enabled": true,
-						"clusters": []map[string]interface{}{
-							{
+						"clusters": map[string]any{
+							"c3": map[string]any{
 								"ips":  []string{"172.19.0.6"},
-								"name": "c3",
 								"port": "32379",
 							},
-							{
+							"c2": map[string]any{
 								"ips":  []string{"172.19.0.5"},
-								"name": "c2",
-								"port": "32379"},
-							{
+								"port": "32379",
+							},
+							"c1": map[string]any{
 								"ips":  []string{"172.19.0.4"},
-								"name": "c1",
-								"port": "32379"},
-							{
+								"port": "32379",
+							},
+							"c5": map[string]any{
 								"ips":  []string{"172.19.0.8"},
-								"name": "c5",
-								"port": "32379"},
+								"port": "32379",
+							},
 						},
 					},
 				},
 			},
 		},
 		"except-nc-same": {
-			oc: []map[string]interface{}{
-				{
+			oc: map[string]any{
+				"c3": map[string]any{
 					"ips":  []string{"172.19.0.6"},
-					"name": "c3",
 					"port": "32379",
 				},
-				{
+				"c2": map[string]any{
 					"ips":  []string{"172.19.0.5"},
-					"name": "c2",
-					"port": "32379"},
-				{
-					"ips":  []string{"172.19.0.4"},
-					"name": "c1",
-					"port": "32379"},
-			},
-			nc: []map[string]interface{}{
-				{
-					"ips":  []string{"172.19.0.6"},
-					"name": "c3",
 					"port": "32379",
 				},
-				{
+				"c1": map[string]any{
+					"ips":  []string{"172.19.0.4"},
+					"port": "32379",
+				},
+			},
+			nc: map[string]any{
+				"c3": map[string]any{
+					"ips":  []string{"172.19.0.6"},
+					"port": "32379",
+				},
+				"c4": map[string]any{
 					"ips":  []string{"172.19.0.7"},
-					"name": "c4",
 					"port": "32379",
 				},
 			},
 			exceptCluster: "c4",
-			e: map[string]interface{}{
-				"clustermesh": map[string]interface{}{
-					"config": map[string]interface{}{
+			e: map[string]any{
+				"clustermesh": map[string]any{
+					"config": map[string]any{
 						"enabled": true,
-						"clusters": []map[string]interface{}{
-							{
+						"clusters": map[string]any{
+							"c3": map[string]any{
 								"ips":  []string{"172.19.0.6"},
-								"name": "c3",
 								"port": "32379",
 							},
-							{
+							"c2": map[string]any{
 								"ips":  []string{"172.19.0.5"},
-								"name": "c2",
-								"port": "32379"},
-							{
+								"port": "32379",
+							},
+							"c1": map[string]any{
 								"ips":  []string{"172.19.0.4"},
-								"name": "c1",
-								"port": "32379"},
+								"port": "32379",
+							},
 						},
 					},
 				},
 			},
 		},
 		"except-oc": {
-			oc: []map[string]interface{}{
-				{
+			oc: map[string]any{
+				"c3": map[string]any{
 					"ips":  []string{"172.19.0.6"},
-					"name": "c3",
 					"port": "32379",
 				},
-				{
+				"c2": map[string]any{
 					"ips":  []string{"172.19.0.5"},
-					"name": "c2",
-					"port": "32379"},
-				{
-					"ips":  []string{"172.19.0.4"},
-					"name": "c1",
-					"port": "32379"},
-			},
-			nc: []map[string]interface{}{
-				{
-					"ips":  []string{"172.19.0.6"},
-					"name": "c3",
 					"port": "32379",
 				},
-				{
+				"c1": map[string]any{
+					"ips":  []string{"172.19.0.4"},
+					"port": "32379",
+				},
+			},
+			nc: map[string]any{
+				"c3": map[string]any{
+					"ips":  []string{"172.19.0.6"},
+					"port": "32379",
+				},
+				"c4": map[string]any{
 					"ips":  []string{"172.19.0.7"},
-					"name": "c4",
 					"port": "32379",
 				},
 			},
 			exceptCluster: "c2",
-			e: map[string]interface{}{
-				"clustermesh": map[string]interface{}{
-					"config": map[string]interface{}{
+			e: map[string]any{
+				"clustermesh": map[string]any{
+					"config": map[string]any{
 						"enabled": true,
-						"clusters": []map[string]interface{}{
-							{
+						"clusters": map[string]any{
+							"c3": map[string]any{
 								"ips":  []string{"172.19.0.6"},
-								"name": "c3",
 								"port": "32379",
 							},
-							{
+							"c2": map[string]any{
 								"ips":  []string{"172.19.0.5"},
-								"name": "c2",
-								"port": "32379"},
-							{
+								"port": "32379",
+							},
+							"c1": map[string]any{
 								"ips":  []string{"172.19.0.4"},
-								"name": "c1",
-								"port": "32379"},
-							{
+								"port": "32379",
+							},
+							"c4": map[string]any{
 								"ips":  []string{"172.19.0.7"},
-								"name": "c4",
-								"port": "32379"},
+								"port": "32379",
+							},
 						},
 					},
 				},
@@ -439,12 +386,7 @@ func TestMergeClusters(t *testing.T) {
 				assert.Equal(t, u.err, err)
 				return
 			}
-
-			// Compare the clusters ignoring the order
-			expectedClusters := u.e["clustermesh"].(map[string]interface{})["config"].(map[string]interface{})["clusters"].([]map[string]interface{})
-			actualClusters := ee["clustermesh"].(map[string]interface{})["config"].(map[string]interface{})["clusters"].([]map[string]interface{})
-
-			assert.True(t, equalClusterSlices(expectedClusters, actualClusters))
+			assert.Equal(t, u.e, ee)
 		})
 	}
 }
@@ -461,7 +403,7 @@ func TestRemoveFromClustermeshConfig(t *testing.T) {
 			e: map[string]any{
 				"clustermesh": map[string]any{
 					"config": map[string]any{
-						"clusters": []map[string]any{},
+						"clusters": map[string]any{},
 						"enabled":  true,
 					},
 				},
@@ -479,7 +421,7 @@ func TestRemoveFromClustermeshConfig(t *testing.T) {
 			e: map[string]any{
 				"clustermesh": map[string]any{
 					"config": map[string]any{
-						"clusters": []map[string]any{},
+						"clusters": map[string]any{},
 						"enabled":  true,
 					},
 				},
@@ -490,20 +432,19 @@ func TestRemoveFromClustermeshConfig(t *testing.T) {
 			vv: map[string]any{
 				"clustermesh": map[string]any{
 					"config": map[string]any{
-						"clusters": []any{
-							map[string]any{
+						"clusters": map[string]any{
+							"c3": map[string]any{
 								"ips":  []any{"172.19.0.6"},
-								"name": "c3",
 								"port": "32379",
 							},
-							map[string]any{
+							"c2": map[string]any{
 								"ips":  []any{"172.19.0.4"},
-								"name": "c2",
-								"port": "32379"},
-							map[string]any{
+								"port": "32379",
+							},
+							"c1": map[string]any{
 								"ips":  []any{"172.19.0.4"},
-								"name": "c1",
-								"port": "32379"},
+								"port": "32379",
+							},
 						},
 					},
 				},
@@ -511,13 +452,13 @@ func TestRemoveFromClustermeshConfig(t *testing.T) {
 			e: map[string]any{
 				"clustermesh": map[string]any{
 					"config": map[string]any{
-						"clusters": []map[string]any{
-							{
+						"clusters": map[string]any{
+							"c3": map[string]any{
 								"ips":  []any{"172.19.0.6"},
-								"name": "c3",
 								"port": "32379",
 							},
-						}, "enabled": true},
+						}, "enabled": true,
+					},
 				},
 			},
 		},
@@ -526,16 +467,15 @@ func TestRemoveFromClustermeshConfig(t *testing.T) {
 			vv: map[string]any{
 				"clustermesh": map[string]any{
 					"config": map[string]any{
-						"clusters": []any{
-							map[string]any{
+						"clusters": map[string]any{
+							"c3": map[string]any{
 								"ips":  []any{"172.19.0.6"},
-								"name": "c3",
 								"port": "32379",
 							},
-							map[string]any{
+							"c2": map[string]any{
 								"ips":  []any{"172.19.0.4"},
-								"name": "c2",
-								"port": "32379"},
+								"port": "32379",
+							},
 						},
 					},
 				},
@@ -543,13 +483,13 @@ func TestRemoveFromClustermeshConfig(t *testing.T) {
 			e: map[string]any{
 				"clustermesh": map[string]any{
 					"config": map[string]any{
-						"clusters": []map[string]any{
-							{
+						"clusters": map[string]any{
+							"c2": map[string]any{
 								"ips":  []any{"172.19.0.4"},
-								"name": "c2",
 								"port": "32379",
 							},
-						}, "enabled": true},
+						}, "enabled": true,
+					},
 				},
 			},
 		},
@@ -558,16 +498,15 @@ func TestRemoveFromClustermeshConfig(t *testing.T) {
 			vv: map[string]any{
 				"clustermesh": map[string]any{
 					"config": map[string]any{
-						"clusters": []any{
-							map[string]any{
+						"clusters": map[string]any{
+							"c3": map[string]any{
 								"ips":  []any{"172.19.0.6"},
-								"name": "c3",
 								"port": "32379",
 							},
-							map[string]any{
+							"c2": map[string]any{
 								"ips":  []any{"172.19.0.4"},
-								"name": "c2",
-								"port": "32379"},
+								"port": "32379",
+							},
 						},
 					},
 				},
@@ -575,15 +514,13 @@ func TestRemoveFromClustermeshConfig(t *testing.T) {
 			e: map[string]any{
 				"clustermesh": map[string]any{
 					"config": map[string]any{
-						"clusters": []map[string]any{
-							{
+						"clusters": map[string]any{
+							"c3": map[string]any{
 								"ips":  []any{"172.19.0.6"},
-								"name": "c3",
 								"port": "32379",
 							},
-							{
+							"c2": map[string]any{
 								"ips":  []any{"172.19.0.4"},
-								"name": "c2",
 								"port": "32379",
 							},
 						},
@@ -630,13 +567,15 @@ func TestRemoteClusterStatusToError(t *testing.T) {
 		{
 			name: "connected, config not found",
 			status: &models.RemoteCluster{
-				Connected: true, Config: &models.RemoteClusterConfig{Required: true}},
+				Connected: true, Config: &models.RemoteClusterConfig{Required: true},
+			},
 			expected: "remote cluster configuration required but not found",
 		},
 		{
 			name: "connected, config not required, sync status unknown",
 			status: &models.RemoteCluster{
-				Connected: true, Config: &models.RemoteClusterConfig{}},
+				Connected: true, Config: &models.RemoteClusterConfig{},
+			},
 			expected: "synchronization status unknown",
 		},
 		{
@@ -711,5 +650,152 @@ func TestGetCASecret(t *testing.T) {
 			tt.assertErr(t, err)
 		})
 	}
+}
 
+func TestGetClustersFromValues(t *testing.T) {
+	tests := []struct {
+		name      string
+		values    map[string]any
+		expected  map[string]any
+		assertErr assert.ErrorAssertionFunc
+	}{
+		{
+			name:      "null",
+			values:    nil,
+			expected:  map[string]any{},
+			assertErr: assert.NoError,
+		},
+		{
+			name: "list",
+			values: map[string]any{
+				"clustermesh": map[string]any{
+					"config": map[string]any{
+						"enabled": true,
+						"clusters": []any{
+							map[string]any{
+								"enabled": false,
+								"ips":     []any{"172.19.0.7"},
+								"name":    "c4",
+								"port":    "32379",
+							},
+							map[string]any{
+								"enabled": true,
+								"ips":     []any{"172.19.0.6"},
+								"name":    "c3",
+								"port":    "32379",
+							},
+							map[string]any{
+								"ips":  []any{"172.19.0.5"},
+								"name": "c2",
+								"port": "32379",
+							},
+							map[string]any{
+								"ips":  []any{"172.19.0.4"},
+								"name": "c1",
+								"port": "32379",
+							},
+						},
+					},
+				},
+			},
+			expected: map[string]any{
+				"c3": map[string]any{
+					"enabled": true,
+					"ips":     []any{"172.19.0.6"},
+					"port":    "32379",
+				},
+				"c2": map[string]any{
+					"ips":  []any{"172.19.0.5"},
+					"port": "32379",
+				},
+				"c1": map[string]any{
+					"ips":  []any{"172.19.0.4"},
+					"port": "32379",
+				},
+			},
+			assertErr: assert.NoError,
+		},
+		{
+			name: "map",
+			values: map[string]any{
+				"clustermesh": map[string]any{
+					"config": map[string]any{
+						"enabled": true,
+						"clusters": map[string]any{
+							"c4": map[string]any{
+								"enabled": false,
+								"ips":     []any{"172.19.0.7"},
+								"port":    "32379",
+							},
+							"c3": map[string]any{
+								"enabled": true,
+								"ips":     []any{"172.19.0.6"},
+								"port":    "32379",
+							},
+							"c2": map[string]any{
+								"ips":  []any{"172.19.0.7"},
+								"port": "32379",
+							},
+							"c1": map[string]any{
+								"ips":  []any{"172.19.0.8"},
+								"port": "32379",
+							},
+						},
+					},
+				},
+			},
+			expected: map[string]any{
+				"c3": map[string]any{
+					"enabled": true,
+					"ips":     []any{"172.19.0.6"},
+					"port":    "32379",
+				},
+				"c2": map[string]any{
+					"ips":  []any{"172.19.0.7"},
+					"port": "32379",
+				},
+				"c1": map[string]any{
+					"ips":  []any{"172.19.0.8"},
+					"port": "32379",
+				},
+			},
+			assertErr: assert.NoError,
+		},
+		{
+			name: "map-error-format",
+			values: map[string]any{
+				"clustermesh": map[string]any{
+					"config": map[string]any{
+						"enabled": true,
+						"clusters": map[string]any{
+							"c3": "test",
+						},
+					},
+				},
+			},
+			expected:  nil,
+			assertErr: assert.Error,
+		},
+		{
+			name: "list-error-format",
+			values: map[string]any{
+				"clustermesh": map[string]any{
+					"config": map[string]any{
+						"enabled":  true,
+						"clusters": []any{"test"},
+					},
+				},
+			},
+			expected:  nil,
+			assertErr: assert.Error,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clusters, err := getClustersFromValues(test.values)
+			test.assertErr(t, err)
+			assert.Equal(t, test.expected, clusters)
+		})
+	}
 }

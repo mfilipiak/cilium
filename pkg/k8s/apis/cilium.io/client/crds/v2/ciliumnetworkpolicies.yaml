@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.16.5
+    controller-gen.kubebuilder.io/version: v0.17.3
   name: ciliumnetworkpolicies.cilium.io
 spec:
   group: cilium.io
@@ -391,8 +391,8 @@ spec:
                       description: |-
                         ToEntities is a list of special entities to which the endpoint subject
                         to the rule is allowed to initiate connections. Supported entities are
-                        `world`, `cluster`,`host`,`remote-node`,`kube-apiserver`, `init`,
-                        `health`,`unmanaged` and `all`.
+                        `world`, `cluster`, `host`, `remote-node`, `kube-apiserver`, `ingress`, `init`,
+                        `health`, `unmanaged`, `none` and `all`.
                       items:
                         description: |-
                           Entity specifies the class of receiver/sender endpoints that do not have
@@ -696,8 +696,10 @@ spec:
                                   type: string
                                 protocol:
                                   description: |-
-                                    Protocol is the L4 protocol. If omitted or empty, any protocol
-                                    matches. Accepted values: "TCP", "UDP", "SCTP", "ANY"
+                                    Protocol is the L4 protocol. If "ANY", omitted or empty, any protocols
+                                    with transport ports (TCP, UDP, SCTP) match.
+
+                                    Accepted values: "TCP", "UDP", "SCTP", "VRRP", "IGMP", "ANY"
 
                                     Matching on ICMP is not supported.
 
@@ -707,10 +709,10 @@ spec:
                                   - TCP
                                   - UDP
                                   - SCTP
+                                  - VRRP
+                                  - IGMP
                                   - ANY
                                   type: string
-                              required:
-                              - port
                               type: object
                             maxItems: 40
                             type: array
@@ -805,8 +807,8 @@ spec:
                                       items:
                                         description: |-
                                           HeaderMatch extends the HeaderValue for matching requirement of a
-                                          named header field against an immediate string, a secret value, or
-                                          a regex.  If none of the optional fields is present, then the
+                                          named header field against an immediate string or a secret value.
+                                          If none of the optional fields is present, then the
                                           header value is not matched, only presence of the header is enough.
                                         properties:
                                           mismatch:
@@ -889,7 +891,9 @@ spec:
                                   type: object
                                 type: array
                               kafka:
-                                description: Kafka-specific rules.
+                                description: |-
+                                  Kafka-specific rules.
+                                  Deprecated: This beta feature is deprecated and will be removed in a future release.
                                 items:
                                   description: |-
                                     PortRule is a list of Kafka protocol constraints. All fields are
@@ -989,8 +993,22 @@ spec:
                               TLS must be present and one of the provided SNIs must be indicated in the
                               TLS handshake.
                             items:
+                              description: |-
+                                ServerName allows using prefix only wildcards to match DNS names.
+
+                                - "*" matches 0 or more DNS valid characters, and may only occur at the
+                                beginning of the pattern. As a special case a "*" as the leftmost character,
+                                without a following "." matches all subdomains as well as the name to the right.
+
+                                Examples:
+                                  - `*.cilium.io` matches exactly one subdomain of cilium at that level www.cilium.io and blog.cilium.io match, cilium.io and google.com do not.
+                                  - `**.cilium.io` matches more than one subdomain of cilium, e.g. sub1.sub2.cilium.io and sub.cilium.io match, cilium.io do not.
+                              maxLength: 255
+                              pattern: ^(\*?\*\.)?([-a-zA-Z0-9_]+\.?)+$
                               type: string
+                            minItems: 1
                             type: array
+                            x-kubernetes-list-type: set
                           terminatingTLS:
                             description: |-
                               TerminatingTLS is the TLS context for the connection terminated by
@@ -1494,8 +1512,8 @@ spec:
                       description: |-
                         ToEntities is a list of special entities to which the endpoint subject
                         to the rule is allowed to initiate connections. Supported entities are
-                        `world`, `cluster`,`host`,`remote-node`,`kube-apiserver`, `init`,
-                        `health`,`unmanaged` and `all`.
+                        `world`, `cluster`, `host`, `remote-node`, `kube-apiserver`, `ingress`, `init`,
+                        `health`, `unmanaged`, `none` and `all`.
                       items:
                         description: |-
                           Entity specifies the class of receiver/sender endpoints that do not have
@@ -1647,8 +1665,10 @@ spec:
                                   type: string
                                 protocol:
                                   description: |-
-                                    Protocol is the L4 protocol. If omitted or empty, any protocol
-                                    matches. Accepted values: "TCP", "UDP", "SCTP", "ANY"
+                                    Protocol is the L4 protocol. If "ANY", omitted or empty, any protocols
+                                    with transport ports (TCP, UDP, SCTP) match.
+
+                                    Accepted values: "TCP", "UDP", "SCTP", "VRRP", "IGMP", "ANY"
 
                                     Matching on ICMP is not supported.
 
@@ -1658,10 +1678,10 @@ spec:
                                   - TCP
                                   - UDP
                                   - SCTP
+                                  - VRRP
+                                  - IGMP
                                   - ANY
                                   type: string
-                              required:
-                              - port
                               type: object
                             type: array
                         type: object
@@ -2157,7 +2177,8 @@ spec:
                       description: |-
                         FromEntities is a list of special entities which the endpoint subject
                         to the rule is allowed to receive connections from. Supported entities are
-                        `world`, `cluster` and `host`
+                        `world`, `cluster`, `host`, `remote-node`, `kube-apiserver`, `ingress`, `init`,
+                        `health`, `unmanaged`, `none` and `all`.
                       items:
                         description: |-
                           Entity specifies the class of receiver/sender endpoints that do not have
@@ -2532,8 +2553,10 @@ spec:
                                   type: string
                                 protocol:
                                   description: |-
-                                    Protocol is the L4 protocol. If omitted or empty, any protocol
-                                    matches. Accepted values: "TCP", "UDP", "SCTP", "ANY"
+                                    Protocol is the L4 protocol. If "ANY", omitted or empty, any protocols
+                                    with transport ports (TCP, UDP, SCTP) match.
+
+                                    Accepted values: "TCP", "UDP", "SCTP", "VRRP", "IGMP", "ANY"
 
                                     Matching on ICMP is not supported.
 
@@ -2543,10 +2566,10 @@ spec:
                                   - TCP
                                   - UDP
                                   - SCTP
+                                  - VRRP
+                                  - IGMP
                                   - ANY
                                   type: string
-                              required:
-                              - port
                               type: object
                             maxItems: 40
                             type: array
@@ -2641,8 +2664,8 @@ spec:
                                       items:
                                         description: |-
                                           HeaderMatch extends the HeaderValue for matching requirement of a
-                                          named header field against an immediate string, a secret value, or
-                                          a regex.  If none of the optional fields is present, then the
+                                          named header field against an immediate string or a secret value.
+                                          If none of the optional fields is present, then the
                                           header value is not matched, only presence of the header is enough.
                                         properties:
                                           mismatch:
@@ -2725,7 +2748,9 @@ spec:
                                   type: object
                                 type: array
                               kafka:
-                                description: Kafka-specific rules.
+                                description: |-
+                                  Kafka-specific rules.
+                                  Deprecated: This beta feature is deprecated and will be removed in a future release.
                                 items:
                                   description: |-
                                     PortRule is a list of Kafka protocol constraints. All fields are
@@ -2825,8 +2850,22 @@ spec:
                               TLS must be present and one of the provided SNIs must be indicated in the
                               TLS handshake.
                             items:
+                              description: |-
+                                ServerName allows using prefix only wildcards to match DNS names.
+
+                                - "*" matches 0 or more DNS valid characters, and may only occur at the
+                                beginning of the pattern. As a special case a "*" as the leftmost character,
+                                without a following "." matches all subdomains as well as the name to the right.
+
+                                Examples:
+                                  - `*.cilium.io` matches exactly one subdomain of cilium at that level www.cilium.io and blog.cilium.io match, cilium.io and google.com do not.
+                                  - `**.cilium.io` matches more than one subdomain of cilium, e.g. sub1.sub2.cilium.io and sub.cilium.io match, cilium.io do not.
+                              maxLength: 255
+                              pattern: ^(\*?\*\.)?([-a-zA-Z0-9_]+\.?)+$
                               type: string
+                            minItems: 1
                             type: array
+                            x-kubernetes-list-type: set
                           terminatingTLS:
                             description: |-
                               TerminatingTLS is the TLS context for the connection terminated by
@@ -3115,7 +3154,8 @@ spec:
                       description: |-
                         FromEntities is a list of special entities which the endpoint subject
                         to the rule is allowed to receive connections from. Supported entities are
-                        `world`, `cluster` and `host`
+                        `world`, `cluster`, `host`, `remote-node`, `kube-apiserver`, `ingress`, `init`,
+                        `health`, `unmanaged`, `none` and `all`.
                       items:
                         description: |-
                           Entity specifies the class of receiver/sender endpoints that do not have
@@ -3395,8 +3435,10 @@ spec:
                                   type: string
                                 protocol:
                                   description: |-
-                                    Protocol is the L4 protocol. If omitted or empty, any protocol
-                                    matches. Accepted values: "TCP", "UDP", "SCTP", "ANY"
+                                    Protocol is the L4 protocol. If "ANY", omitted or empty, any protocols
+                                    with transport ports (TCP, UDP, SCTP) match.
+
+                                    Accepted values: "TCP", "UDP", "SCTP", "VRRP", "IGMP", "ANY"
 
                                     Matching on ICMP is not supported.
 
@@ -3406,10 +3448,10 @@ spec:
                                   - TCP
                                   - UDP
                                   - SCTP
+                                  - VRRP
+                                  - IGMP
                                   - ANY
                                   type: string
-                              required:
-                              - port
                               type: object
                             type: array
                         type: object
@@ -3437,6 +3479,17 @@ spec:
                   - key
                   type: object
                 type: array
+              log:
+                description: Log specifies custom policy-specific Hubble logging configuration.
+                properties:
+                  value:
+                    description: |-
+                      Value is a free-form string that is included in Hubble flows
+                      that match this policy. The string is limited to 32 printable characters.
+                    maxLength: 32
+                    pattern: ^\PC*$
+                    type: string
+                type: object
               nodeSelector:
                 description: |-
                   NodeSelector selects all nodes which should be subject to this rule.
@@ -3850,8 +3903,8 @@ spec:
                         description: |-
                           ToEntities is a list of special entities to which the endpoint subject
                           to the rule is allowed to initiate connections. Supported entities are
-                          `world`, `cluster`,`host`,`remote-node`,`kube-apiserver`, `init`,
-                          `health`,`unmanaged` and `all`.
+                          `world`, `cluster`, `host`, `remote-node`, `kube-apiserver`, `ingress`, `init`,
+                          `health`, `unmanaged`, `none` and `all`.
                         items:
                           description: |-
                             Entity specifies the class of receiver/sender endpoints that do not have
@@ -4155,8 +4208,10 @@ spec:
                                     type: string
                                   protocol:
                                     description: |-
-                                      Protocol is the L4 protocol. If omitted or empty, any protocol
-                                      matches. Accepted values: "TCP", "UDP", "SCTP", "ANY"
+                                      Protocol is the L4 protocol. If "ANY", omitted or empty, any protocols
+                                      with transport ports (TCP, UDP, SCTP) match.
+
+                                      Accepted values: "TCP", "UDP", "SCTP", "VRRP", "IGMP", "ANY"
 
                                       Matching on ICMP is not supported.
 
@@ -4166,10 +4221,10 @@ spec:
                                     - TCP
                                     - UDP
                                     - SCTP
+                                    - VRRP
+                                    - IGMP
                                     - ANY
                                     type: string
-                                required:
-                                - port
                                 type: object
                               maxItems: 40
                               type: array
@@ -4264,8 +4319,8 @@ spec:
                                         items:
                                           description: |-
                                             HeaderMatch extends the HeaderValue for matching requirement of a
-                                            named header field against an immediate string, a secret value, or
-                                            a regex.  If none of the optional fields is present, then the
+                                            named header field against an immediate string or a secret value.
+                                            If none of the optional fields is present, then the
                                             header value is not matched, only presence of the header is enough.
                                           properties:
                                             mismatch:
@@ -4348,7 +4403,9 @@ spec:
                                     type: object
                                   type: array
                                 kafka:
-                                  description: Kafka-specific rules.
+                                  description: |-
+                                    Kafka-specific rules.
+                                    Deprecated: This beta feature is deprecated and will be removed in a future release.
                                   items:
                                     description: |-
                                       PortRule is a list of Kafka protocol constraints. All fields are
@@ -4448,8 +4505,22 @@ spec:
                                 TLS must be present and one of the provided SNIs must be indicated in the
                                 TLS handshake.
                               items:
+                                description: |-
+                                  ServerName allows using prefix only wildcards to match DNS names.
+
+                                  - "*" matches 0 or more DNS valid characters, and may only occur at the
+                                  beginning of the pattern. As a special case a "*" as the leftmost character,
+                                  without a following "." matches all subdomains as well as the name to the right.
+
+                                  Examples:
+                                    - `*.cilium.io` matches exactly one subdomain of cilium at that level www.cilium.io and blog.cilium.io match, cilium.io and google.com do not.
+                                    - `**.cilium.io` matches more than one subdomain of cilium, e.g. sub1.sub2.cilium.io and sub.cilium.io match, cilium.io do not.
+                                maxLength: 255
+                                pattern: ^(\*?\*\.)?([-a-zA-Z0-9_]+\.?)+$
                                 type: string
+                              minItems: 1
                               type: array
+                              x-kubernetes-list-type: set
                             terminatingTLS:
                               description: |-
                                 TerminatingTLS is the TLS context for the connection terminated by
@@ -4954,8 +5025,8 @@ spec:
                         description: |-
                           ToEntities is a list of special entities to which the endpoint subject
                           to the rule is allowed to initiate connections. Supported entities are
-                          `world`, `cluster`,`host`,`remote-node`,`kube-apiserver`, `init`,
-                          `health`,`unmanaged` and `all`.
+                          `world`, `cluster`, `host`, `remote-node`, `kube-apiserver`, `ingress`, `init`,
+                          `health`, `unmanaged`, `none` and `all`.
                         items:
                           description: |-
                             Entity specifies the class of receiver/sender endpoints that do not have
@@ -5107,8 +5178,10 @@ spec:
                                     type: string
                                   protocol:
                                     description: |-
-                                      Protocol is the L4 protocol. If omitted or empty, any protocol
-                                      matches. Accepted values: "TCP", "UDP", "SCTP", "ANY"
+                                      Protocol is the L4 protocol. If "ANY", omitted or empty, any protocols
+                                      with transport ports (TCP, UDP, SCTP) match.
+
+                                      Accepted values: "TCP", "UDP", "SCTP", "VRRP", "IGMP", "ANY"
 
                                       Matching on ICMP is not supported.
 
@@ -5118,10 +5191,10 @@ spec:
                                     - TCP
                                     - UDP
                                     - SCTP
+                                    - VRRP
+                                    - IGMP
                                     - ANY
                                     type: string
-                                required:
-                                - port
                                 type: object
                               type: array
                           type: object
@@ -5617,7 +5690,8 @@ spec:
                         description: |-
                           FromEntities is a list of special entities which the endpoint subject
                           to the rule is allowed to receive connections from. Supported entities are
-                          `world`, `cluster` and `host`
+                          `world`, `cluster`, `host`, `remote-node`, `kube-apiserver`, `ingress`, `init`,
+                          `health`, `unmanaged`, `none` and `all`.
                         items:
                           description: |-
                             Entity specifies the class of receiver/sender endpoints that do not have
@@ -5993,8 +6067,10 @@ spec:
                                     type: string
                                   protocol:
                                     description: |-
-                                      Protocol is the L4 protocol. If omitted or empty, any protocol
-                                      matches. Accepted values: "TCP", "UDP", "SCTP", "ANY"
+                                      Protocol is the L4 protocol. If "ANY", omitted or empty, any protocols
+                                      with transport ports (TCP, UDP, SCTP) match.
+
+                                      Accepted values: "TCP", "UDP", "SCTP", "VRRP", "IGMP", "ANY"
 
                                       Matching on ICMP is not supported.
 
@@ -6004,10 +6080,10 @@ spec:
                                     - TCP
                                     - UDP
                                     - SCTP
+                                    - VRRP
+                                    - IGMP
                                     - ANY
                                     type: string
-                                required:
-                                - port
                                 type: object
                               maxItems: 40
                               type: array
@@ -6102,8 +6178,8 @@ spec:
                                         items:
                                           description: |-
                                             HeaderMatch extends the HeaderValue for matching requirement of a
-                                            named header field against an immediate string, a secret value, or
-                                            a regex.  If none of the optional fields is present, then the
+                                            named header field against an immediate string or a secret value.
+                                            If none of the optional fields is present, then the
                                             header value is not matched, only presence of the header is enough.
                                           properties:
                                             mismatch:
@@ -6186,7 +6262,9 @@ spec:
                                     type: object
                                   type: array
                                 kafka:
-                                  description: Kafka-specific rules.
+                                  description: |-
+                                    Kafka-specific rules.
+                                    Deprecated: This beta feature is deprecated and will be removed in a future release.
                                   items:
                                     description: |-
                                       PortRule is a list of Kafka protocol constraints. All fields are
@@ -6286,8 +6364,22 @@ spec:
                                 TLS must be present and one of the provided SNIs must be indicated in the
                                 TLS handshake.
                               items:
+                                description: |-
+                                  ServerName allows using prefix only wildcards to match DNS names.
+
+                                  - "*" matches 0 or more DNS valid characters, and may only occur at the
+                                  beginning of the pattern. As a special case a "*" as the leftmost character,
+                                  without a following "." matches all subdomains as well as the name to the right.
+
+                                  Examples:
+                                    - `*.cilium.io` matches exactly one subdomain of cilium at that level www.cilium.io and blog.cilium.io match, cilium.io and google.com do not.
+                                    - `**.cilium.io` matches more than one subdomain of cilium, e.g. sub1.sub2.cilium.io and sub.cilium.io match, cilium.io do not.
+                                maxLength: 255
+                                pattern: ^(\*?\*\.)?([-a-zA-Z0-9_]+\.?)+$
                                 type: string
+                              minItems: 1
                               type: array
+                              x-kubernetes-list-type: set
                             terminatingTLS:
                               description: |-
                                 TerminatingTLS is the TLS context for the connection terminated by
@@ -6576,7 +6668,8 @@ spec:
                         description: |-
                           FromEntities is a list of special entities which the endpoint subject
                           to the rule is allowed to receive connections from. Supported entities are
-                          `world`, `cluster` and `host`
+                          `world`, `cluster`, `host`, `remote-node`, `kube-apiserver`, `ingress`, `init`,
+                          `health`, `unmanaged`, `none` and `all`.
                         items:
                           description: |-
                             Entity specifies the class of receiver/sender endpoints that do not have
@@ -6857,8 +6950,10 @@ spec:
                                     type: string
                                   protocol:
                                     description: |-
-                                      Protocol is the L4 protocol. If omitted or empty, any protocol
-                                      matches. Accepted values: "TCP", "UDP", "SCTP", "ANY"
+                                      Protocol is the L4 protocol. If "ANY", omitted or empty, any protocols
+                                      with transport ports (TCP, UDP, SCTP) match.
+
+                                      Accepted values: "TCP", "UDP", "SCTP", "VRRP", "IGMP", "ANY"
 
                                       Matching on ICMP is not supported.
 
@@ -6868,10 +6963,10 @@ spec:
                                     - TCP
                                     - UDP
                                     - SCTP
+                                    - VRRP
+                                    - IGMP
                                     - ANY
                                     type: string
-                                required:
-                                - port
                                 type: object
                               type: array
                           type: object
@@ -6900,6 +6995,18 @@ spec:
                     - key
                     type: object
                   type: array
+                log:
+                  description: Log specifies custom policy-specific Hubble logging
+                    configuration.
+                  properties:
+                    value:
+                      description: |-
+                        Value is a free-form string that is included in Hubble flows
+                        that match this policy. The string is limited to 32 printable characters.
+                      maxLength: 32
+                      pattern: ^\PC*$
+                      type: string
+                  type: object
                 nodeSelector:
                   description: |-
                     NodeSelector selects all nodes which should be subject to this rule.

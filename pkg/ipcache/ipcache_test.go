@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/require"
 
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
@@ -42,9 +43,9 @@ func setupIPCacheTestSuite(tb testing.TB) *IPCacheTestSuite {
 	}
 	IPIdentityCache = NewIPCache(&Configuration{
 		Context:           ctx,
+		Logger:            hivetest.Logger(tb),
 		IdentityAllocator: Allocator,
-		PolicyHandler:     PolicyHandler,
-		DatapathHandler:   &mockTriggerer{},
+		IdentityUpdater:   PolicyHandler,
 	})
 
 	tb.Cleanup(func() {
@@ -122,8 +123,8 @@ func TestIPCache(t *testing.T) {
 	})
 
 	cachedHostIP, _ := IPIdentityCache.getHostIPCacheRLocked(endpointIP)
-	require.EqualValues(t, hostIP, cachedHostIP)
-	require.EqualValues(t, k8sMeta, IPIdentityCache.GetK8sMetadata(netip.MustParseAddr(endpointIP)))
+	require.Equal(t, hostIP, cachedHostIP)
+	require.Equal(t, k8sMeta, IPIdentityCache.GetK8sMetadata(netip.MustParseAddr(endpointIP)))
 
 	newIdentity := identityPkg.NumericIdentity(69)
 	IPIdentityCache.Upsert(endpointIP, hostIP, 0, k8sMeta, Identity{
@@ -167,14 +168,14 @@ func TestIPCache(t *testing.T) {
 
 	cachedEndpointIPs := IPIdentityCache.LookupByIdentity(29)
 	slices.Sort(cachedEndpointIPs)
-	require.EqualValues(t, expectedIPList, cachedEndpointIPs)
+	require.Equal(t, expectedIPList, cachedEndpointIPs)
 
 	IPIdentityCache.Delete("27.2.2.2", source.KVStore)
 
 	expectedIPList = []string{"127.0.0.1"}
 
 	cachedEndpointIPs = IPIdentityCache.LookupByIdentity(29)
-	require.EqualValues(t, expectedIPList, cachedEndpointIPs)
+	require.Equal(t, expectedIPList, cachedEndpointIPs)
 
 	cachedIdentity, exists = IPIdentityCache.LookupByIP("127.0.0.1")
 	require.True(t, exists)
@@ -237,6 +238,7 @@ func TestIPCache(t *testing.T) {
 }
 
 func TestIPCacheNamedPorts(t *testing.T) {
+	logger := hivetest.Logger(t)
 	endpointIP := "10.0.0.15"
 	identity := identityPkg.NumericIdentity(68)
 
@@ -386,8 +388,8 @@ func TestIPCacheNamedPorts(t *testing.T) {
 	require.Len(t, IPIdentityCache.ipToK8sMetadata, 2)
 
 	cachedHostIP, _ := IPIdentityCache.getHostIPCacheRLocked(endpointIP)
-	require.EqualValues(t, hostIP, cachedHostIP)
-	require.EqualValues(t, k8sMeta, IPIdentityCache.GetK8sMetadata(netip.MustParseAddr(endpointIP)))
+	require.Equal(t, hostIP, cachedHostIP)
+	require.Equal(t, k8sMeta, IPIdentityCache.GetK8sMetadata(netip.MustParseAddr(endpointIP)))
 
 	newIdentity := identityPkg.NumericIdentity(69)
 	namedPortsChanged, err = IPIdentityCache.Upsert(endpointIP, hostIP, 0, k8sMeta, Identity{
@@ -453,7 +455,7 @@ func TestIPCacheNamedPorts(t *testing.T) {
 
 	cachedEndpointIPs := IPIdentityCache.LookupByIdentity(29)
 	slices.Sort(cachedEndpointIPs)
-	require.EqualValues(t, expectedIPList, cachedEndpointIPs)
+	require.Equal(t, expectedIPList, cachedEndpointIPs)
 
 	namedPortsChanged = IPIdentityCache.Delete("27.2.2.2", source.KVStore)
 	require.False(t, namedPortsChanged)
@@ -461,7 +463,7 @@ func TestIPCacheNamedPorts(t *testing.T) {
 	expectedIPList = []string{"127.0.0.1"}
 
 	cachedEndpointIPs = IPIdentityCache.LookupByIdentity(29)
-	require.EqualValues(t, expectedIPList, cachedEndpointIPs)
+	require.Equal(t, expectedIPList, cachedEndpointIPs)
 
 	cachedIdentity, exists = IPIdentityCache.LookupByIP("127.0.0.1")
 	require.True(t, exists)
@@ -484,7 +486,7 @@ func TestIPCacheNamedPorts(t *testing.T) {
 		namedPortsChanged = IPIdentityCache.Delete(endpointIPs[index], source.KVStore)
 		npm = IPIdentityCache.GetNamedPorts()
 		require.NotNil(t, npm)
-		log.Infof("Named ports after Delete %d: %v", index, npm)
+		logger.Info(fmt.Sprintf("Named ports after Delete %d: %v", index, npm))
 		// 2nd delete removes named port mapping, as remaining IPs have an already deleted ID (29)
 		require.Equal(t, index == 1, namedPortsChanged)
 
@@ -521,6 +523,7 @@ func BenchmarkIPCacheUpsert10000(b *testing.B) {
 }
 
 func benchmarkIPCacheUpsert(b *testing.B, num int) {
+	logger := hivetest.Logger(b)
 	meta := K8sMetadata{
 		Namespace: "default",
 		PodName:   "app",
@@ -540,21 +543,19 @@ func benchmarkIPCacheUpsert(b *testing.B, num int) {
 		nms[i] = strconv.Itoa(i)
 	}
 
-	b.StopTimer()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		ctx, cancel := context.WithCancel(context.Background())
 		allocator := testidentity.NewMockIdentityAllocator(nil)
 		ipcache := NewIPCache(&Configuration{
 			Context:           ctx,
+			Logger:            logger,
 			IdentityAllocator: allocator,
-			PolicyHandler:     &mockUpdater{},
-			DatapathHandler:   &mockTriggerer{},
+			IdentityUpdater:   &mockUpdater{},
 		})
 
 		// We only want to measure the calls to upsert.
 		b.StartTimer()
-		for j := 0; j < num; j++ {
+		for j := range num {
 			meta.PodName = nms[j]
 			_, err := ipcache.Upsert(ips[j], nil, 0, &meta, Identity{
 				ID:     identityPkg.NumericIdentity(j),
@@ -603,8 +604,8 @@ func (dl *dummyListener) ExpectMapping(t *testing.T, targetIP string, targetIden
 
 	// Dump reliably supplies the IP once and only the pod identity.
 	dl.entries = make(map[string]identityPkg.NumericIdentity)
-	dl.ipc.DumpToListenerLocked(dl)
-	require.EqualValues(t, map[string]identityPkg.NumericIdentity{
+	dl.ipc.dumpToListenerLocked(dl)
+	require.Equal(t, map[string]identityPkg.NumericIdentity{
 		targetIP: targetIdentity,
 	}, dl.entries)
 }
@@ -619,8 +620,8 @@ func TestIPCacheShadowing(t *testing.T) {
 	ipc := IPIdentityCache
 
 	// Assure sane state at start.
-	require.EqualValues(t, map[string]Identity{}, ipc.ipToIdentityCache)
-	require.EqualValues(t, map[identityPkg.NumericIdentity]map[string]struct{}{}, ipc.identityToIPCache)
+	require.Equal(t, map[string]Identity{}, ipc.ipToIdentityCache)
+	require.Equal(t, map[identityPkg.NumericIdentity]map[string]struct{}{}, ipc.identityToIPCache)
 
 	// Upsert overlapping identities for the IP. Pod identity takes precedence.
 	ipc.Upsert(endpointIP, nil, 0, nil, Identity{

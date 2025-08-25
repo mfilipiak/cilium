@@ -4,12 +4,36 @@
 #pragma once
 
 #include "lib/common.h"
-#include "lib/fib.h"
 #include "lib/identity.h"
+#include "lib/tailcall.h"
 
-#include "maps.h"
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__type(key, struct srv6_vrf_key6);
+	__type(value, __u32);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(max_entries, SRV6_VRF_MAP_SIZE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} cilium_srv6_vrf_v6 __section_maps_btf;
 
-#ifdef ENABLE_SRV6
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__type(key, struct srv6_policy_key6);
+	__type(value, union v6addr);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(max_entries, SRV6_POLICY_MAP_SIZE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} cilium_srv6_policy_v6 __section_maps_btf;
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, union v6addr); /* SID */
+    __type(value, __u32);      /* VRF ID */
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+    __uint(max_entries, SRV6_SID_MAP_SIZE);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+} cilium_srv6_sid __section_maps_btf;
+
 struct srv6_srh {
 	struct ipv6_rt_hdr rthdr;
 	__u8 first_segment;
@@ -18,6 +42,25 @@ struct srv6_srh {
 	struct in6_addr segments[0];
 };
 
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__type(key, struct srv6_vrf_key4);
+	__type(value, __u32);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(max_entries, SRV6_VRF_MAP_SIZE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} cilium_srv6_vrf_v4 __section_maps_btf;
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__type(key, struct srv6_policy_key4);
+	__type(value, union v6addr);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(max_entries, SRV6_POLICY_MAP_SIZE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} cilium_srv6_policy_v4 __section_maps_btf;
+
+#ifdef ENABLE_SRV6
 # ifdef ENABLE_IPV4
 
 /* SRV6_VRF_STATIC_PREFIX4 gets sizeof non-IP, non-prefix part of
@@ -36,7 +79,7 @@ srv6_lookup_vrf4(__be32 sip, __be32 dip)
 		.src_ip = sip,
 		.dst_cidr = dip,
 	};
-	return map_lookup_elem(&SRV6_VRF_MAP4, &key);
+	return map_lookup_elem(&cilium_srv6_vrf_v4, &key);
 }
 
 /* SRV6_POLICY_STATIC_PREFIX4 gets sizeof non-IP, non-prefix part of
@@ -55,7 +98,7 @@ srv6_lookup_policy4(__u32 vrf_id, __be32 dip)
 		.vrf_id = vrf_id,
 		.dst_cidr = dip,
 	};
-	return map_lookup_elem(&SRV6_POLICY_MAP4, &key);
+	return map_lookup_elem(&cilium_srv6_policy_v4, &key);
 }
 # endif /* ENABLE_IPV4 */
 
@@ -75,7 +118,7 @@ srv6_lookup_vrf6(const struct in6_addr *sip, const struct in6_addr *dip)
 		.src_ip = *(union v6addr *)sip,
 		.dst_cidr = *(union v6addr *)dip,
 	};
-	return map_lookup_elem(&SRV6_VRF_MAP6, &key);
+	return map_lookup_elem(&cilium_srv6_vrf_v6, &key);
 }
 
 /* SRV6_POLICY_STATIC_PREFIX6 gets sizeof non-IP, non-prefix part of
@@ -95,7 +138,7 @@ srv6_lookup_policy6(__u32 vrf_id, const struct in6_addr *dip)
 		.vrf_id = vrf_id,
 		.dst_cidr = *(union v6addr *)dip,
 	};
-	return map_lookup_elem(&SRV6_POLICY_MAP6, &key);
+	return map_lookup_elem(&cilium_srv6_policy_v6, &key);
 }
 
 static __always_inline __u32
@@ -103,7 +146,7 @@ srv6_lookup_sid(const struct in6_addr *sid)
 {
 	__u32 *vrf_id;
 
-	vrf_id = map_lookup_elem(&SRV6_SID_MAP, sid);
+	vrf_id = map_lookup_elem(&cilium_srv6_sid, sid);
 	if (vrf_id)
 		return *vrf_id;
 	return 0;
@@ -322,9 +365,7 @@ srv6_handling(struct __ctx_buff *ctx, struct in6_addr *dst_sid)
 {
 	void *data, *data_end;
 	__u16 inner_proto;
-	union v6addr router_ip;
-
-	BPF_V6(router_ip, ROUTER_IP);
+	union v6addr router_ip = CONFIG(router_ipv6);
 
 	if (!validate_ethertype(ctx, &inner_proto))
 		return DROP_UNSUPPORTED_L2;
@@ -367,7 +408,7 @@ srv6_store_meta_sid(struct __ctx_buff *ctx, const union v6addr *sid)
 	ctx_store_meta_ipv6(ctx, CB_SRV6_SID_1, sid);
 }
 
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_SRV6_ENCAP)
+__declare_tail(CILIUM_CALL_SRV6_ENCAP)
 int tail_srv6_encap(struct __ctx_buff *ctx)
 {
 	struct in6_addr dst_sid;
@@ -380,13 +421,13 @@ int tail_srv6_encap(struct __ctx_buff *ctx)
 		return send_drop_notify_error(ctx, SECLABEL_IPV6, ret, METRIC_EGRESS);
 
 	send_trace_notify(ctx, TRACE_TO_STACK, SECLABEL_IPV6, UNKNOWN_ID,
-			  TRACE_EP_ID_UNKNOWN,
-			  TRACE_IFINDEX_UNKNOWN, TRACE_REASON_SRV6_ENCAP, 0);
+			  TRACE_EP_ID_UNKNOWN, TRACE_IFINDEX_UNKNOWN,
+			  TRACE_REASON_SRV6_ENCAP, 0, bpf_htons(ETH_P_IPV6));
 
 	return ret;
 }
 
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_SRV6_DECAP)
+__declare_tail(CILIUM_CALL_SRV6_DECAP)
 int tail_srv6_decap(struct __ctx_buff *ctx)
 {
 	int ret = 0;
@@ -409,7 +450,7 @@ int tail_srv6_decap(struct __ctx_buff *ctx)
 	case IPPROTO_IPIP:
 		send_trace_notify(ctx, TRACE_FROM_NETWORK, SECLABEL_IPV4, UNKNOWN_ID,
 				  TRACE_EP_ID_UNKNOWN, TRACE_IFINDEX_UNKNOWN,
-				  TRACE_REASON_SRV6_DECAP, 0);
+				  TRACE_REASON_SRV6_DECAP, 0, bpf_htons(ETH_P_IP));
 		ret = tail_call_internal(ctx, CILIUM_CALL_IPV4_FROM_NETDEV, &ext_err);
 		return send_drop_notify_error_ext(ctx, SECLABEL_IPV6, ret, ext_err,
 						  METRIC_INGRESS);
@@ -418,7 +459,7 @@ int tail_srv6_decap(struct __ctx_buff *ctx)
 	case IPPROTO_IPV6:
 		send_trace_notify(ctx, TRACE_FROM_NETWORK, SECLABEL_IPV6, UNKNOWN_ID,
 				  TRACE_EP_ID_UNKNOWN, TRACE_IFINDEX_UNKNOWN,
-				  TRACE_REASON_SRV6_DECAP, 0);
+				  TRACE_REASON_SRV6_DECAP, 0, bpf_htons(ETH_P_IPV6));
 		ret = tail_call_internal(ctx, CILIUM_CALL_IPV6_FROM_NETDEV, &ext_err);
 		return send_drop_notify_error_ext(ctx, SECLABEL_IPV6, ret, ext_err,
 						  METRIC_INGRESS);

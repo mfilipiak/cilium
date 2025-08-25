@@ -19,6 +19,10 @@
 #include "utils.h"
 #include "metrics.h"
 #include "ratelimit.h"
+#include "tailcall.h"
+#include "classifiers.h"
+
+#define NOTIFY_DROP_VER 2
 
 struct drop_notify {
 	NOTIFY_CAPTURE_HDR
@@ -29,6 +33,11 @@ struct drop_notify {
 	__u8		file;
 	__s8		ext_error;
 	__u32		ifindex;
+	__u8		flags; /* __u8 instead of cls_flags_t so that it will error
+				* when cls_flags_t grows (either borrow bits from pad2 or
+				* move to flags_lower/flags_upper).
+				*/
+	__u8		pad2[3];
 };
 
 #ifdef DROP_NOTIFY
@@ -49,17 +58,18 @@ struct drop_notify {
  *
  */
 
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_DROP_NOTIFY)
-int __send_drop_notify(struct __ctx_buff *ctx)
+__declare_tail(CILIUM_CALL_DROP_NOTIFY)
+int tail_drop_notify(struct __ctx_buff *ctx)
 {
 	/* Mask needed to calm verifier. */
 	__u32 error = ctx_load_meta(ctx, 2) & 0xFFFFFFFF;
 	__u64 ctx_len = ctx_full_len(ctx);
-	__u64 cap_len = min_t(__u64, TRACE_PAYLOAD_LEN, ctx_len);
+	__u64 cap_len;
 	__u32 meta4 = ctx_load_meta(ctx, 4);
 	__u16 line = (__u16)(meta4 >> 16);
 	__u8 file = (__u8)(meta4 >> 8);
 	__u8 exitcode = (__u8)meta4;
+	cls_flags_t flags = CLS_FLAG_NONE;
 	struct ratelimit_key rkey = {
 		.usage = RATELIMIT_USAGE_EVENTS_MAP,
 	};
@@ -75,9 +85,12 @@ int __send_drop_notify(struct __ctx_buff *ctx)
 			return exitcode;
 	}
 
+	flags = ctx_classify(ctx, 0, TRACE_POINT_UNKNOWN);
+	cap_len = compute_capture_len(ctx, 0, flags, TRACE_POINT_UNKNOWN);
+
 	msg = (typeof(msg)) {
 		__notify_common_hdr(CILIUM_NOTIFY_DROP, (__u8)error),
-		__notify_pktcap_hdr((__u32)ctx_len, (__u16)cap_len, NOTIFY_CAPTURE_VER),
+		__notify_pktcap_hdr((__u32)ctx_len, (__u16)cap_len, NOTIFY_DROP_VER),
 		.src_label	= ctx_load_meta(ctx, 0),
 		.dst_label	= ctx_load_meta(ctx, 1),
 		.dst_id		= ctx_load_meta(ctx, 3),
@@ -85,9 +98,10 @@ int __send_drop_notify(struct __ctx_buff *ctx)
 		.file           = file,
 		.ext_error      = (__s8)(__u8)(error >> 8),
 		.ifindex        = ctx_get_ifindex(ctx),
+		.flags          = flags,
 	};
 
-	ctx_event_output(ctx, &EVENTS_MAP,
+	ctx_event_output(ctx, &cilium_events,
 			 (cap_len << 32) | BPF_F_CURRENT_CPU,
 			 &msg, sizeof(msg));
 

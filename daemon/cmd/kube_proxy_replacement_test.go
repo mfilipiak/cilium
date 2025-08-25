@@ -8,15 +8,20 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
 	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
 	"github.com/cilium/cilium/pkg/datapath/tunnel"
 	"github.com/cilium/cilium/pkg/hive"
+	"github.com/cilium/cilium/pkg/kpr"
+	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/option"
+	wgTypes "github.com/cilium/cilium/pkg/wireguard/types"
 )
 
 type KPRSuite struct{}
@@ -28,7 +33,6 @@ type kprConfig struct {
 	enableNodePort             bool
 	enableHostPort             bool
 	enableExternalIPs          bool
-	enableSessionAffinity      bool
 	enableIPSec                bool
 	enableHostLegacyRouting    bool
 	installNoConntrackIptRules bool
@@ -39,18 +43,30 @@ type kprConfig struct {
 	expectedErrorRegex string
 
 	routingMode    string
-	tunnelProtocol tunnel.Protocol
+	tunnelProtocol tunnel.EncapProtocol
 	nodePortMode   string
 	dispatchMode   string
+
+	lbConfig  loadbalancer.Config
+	kprConfig kpr.KPRConfig
 }
 
-func (cfg *kprConfig) set() {
-	option.Config.KubeProxyReplacement = cfg.kubeProxyReplacement
-	option.Config.EnableSocketLB = cfg.enableSocketLB
-	option.Config.EnableNodePort = cfg.enableNodePort
-	option.Config.EnableHostPort = cfg.enableHostPort
-	option.Config.EnableExternalIPs = cfg.enableExternalIPs
-	option.Config.EnableSessionAffinity = cfg.enableSessionAffinity
+func (cfg *kprConfig) set() (err error) {
+	cfg.lbConfig = loadbalancer.DefaultConfig
+
+	kprFlags := kpr.KPRFlags{
+		KubeProxyReplacement: cfg.kubeProxyReplacement,
+		EnableNodePort:       cfg.enableNodePort,
+		EnableSocketLB:       cfg.enableSocketLB,
+		EnableHostPort:       cfg.enableHostPort,
+		EnableExternalIPs:    cfg.enableExternalIPs,
+	}
+
+	cfg.kprConfig, err = kpr.NewKPRConfig(kprFlags)
+	if err != nil {
+		return err
+	}
+
 	option.Config.EnableIPSec = cfg.enableIPSec
 	option.Config.EnableHostLegacyRouting = cfg.enableHostLegacyRouting
 	option.Config.InstallNoConntrackIptRules = cfg.installNoConntrackIptRules
@@ -58,11 +74,14 @@ func (cfg *kprConfig) set() {
 	option.Config.EnableIPv4Masquerade = cfg.enableIPv4Masquerade
 	option.Config.EnableSocketLBTracing = true
 	option.Config.RoutingMode = cfg.routingMode
-	option.Config.LoadBalancerDSRDispatch = cfg.dispatchMode
 
-	if cfg.nodePortMode == option.NodePortModeDSR || cfg.nodePortMode == option.NodePortModeHybrid {
-		option.Config.NodePortMode = cfg.nodePortMode
+	if cfg.nodePortMode == loadbalancer.LBModeDSR || cfg.nodePortMode == loadbalancer.LBModeHybrid {
+		cfg.lbConfig.LBMode = cfg.nodePortMode
 	}
+
+	cfg.lbConfig.DSRDispatch = cfg.dispatchMode
+
+	return nil
 }
 
 func errorMatch(err error, regex string) assert.Comparison {
@@ -79,20 +98,20 @@ func errorMatch(err error, regex string) assert.Comparison {
 	}
 }
 
-func (cfg *kprConfig) verify(t *testing.T, tc tunnel.Config) {
-	err := initKubeProxyReplacementOptions(sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc"), tc)
+func (cfg *kprConfig) verify(t *testing.T, lbConfig loadbalancer.Config, kprCfg kpr.KPRConfig, tc tunnel.Config, wgCfg wgTypes.WireguardConfig) {
+	logger := hivetest.Logger(t)
+	err := initKubeProxyReplacementOptions(logger, sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc"), tc, lbConfig, kprCfg, wgCfg)
 	if err != nil || cfg.expectedErrorRegex != "" {
+		t.Logf("err=%s, expected=%s, cfg=%+v", err, cfg.expectedErrorRegex, cfg)
 		require.Condition(t, errorMatch(err, cfg.expectedErrorRegex))
 		if strings.Contains(cfg.expectedErrorRegex, "Invalid") {
 			return
 		}
 	}
-
-	require.Equal(t, cfg.enableSocketLB, option.Config.EnableSocketLB)
-	require.Equal(t, cfg.enableNodePort, option.Config.EnableNodePort)
-	require.Equal(t, cfg.enableHostPort, option.Config.EnableHostPort)
-	require.Equal(t, cfg.enableExternalIPs, option.Config.EnableExternalIPs)
-	require.Equal(t, cfg.enableSessionAffinity, option.Config.EnableSessionAffinity)
+	require.Equal(t, cfg.enableSocketLB, kprCfg.EnableSocketLB)
+	require.Equal(t, cfg.enableNodePort, kprCfg.EnableNodePort)
+	require.Equal(t, cfg.enableHostPort, kprCfg.EnableHostPort)
+	require.Equal(t, cfg.enableExternalIPs, kprCfg.EnableExternalIPs)
 	require.Equal(t, cfg.enableIPSec, option.Config.EnableIPSec)
 	require.Equal(t, cfg.enableHostLegacyRouting, option.Config.EnableHostLegacyRouting)
 	require.Equal(t, cfg.installNoConntrackIptRules, option.Config.InstallNoConntrackIptRules)
@@ -107,8 +126,9 @@ func setupKPRSuite(tb testing.TB) *KPRSuite {
 	mockCmd := &cobra.Command{}
 	h := hive.New(Agent)
 	h.RegisterFlags(mockCmd.Flags())
-	InitGlobalFlags(mockCmd, h.Viper())
-	option.Config.Populate(h.Viper())
+	logger := hivetest.Logger(tb)
+	InitGlobalFlags(logger, mockCmd, h.Viper())
+	option.Config.Populate(logger, h.Viper())
 	option.Config.DryMode = true
 
 	return s
@@ -122,18 +142,6 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 		mod  func(*kprConfig)
 		out  kprConfig
 	}{
-		// Invalid value for kube-proxy-replacement yields error
-		{
-			"invalid-value",
-			func(cfg *kprConfig) {
-				cfg.kubeProxyReplacement = "invalid value"
-			},
-			kprConfig{
-				kubeProxyReplacement: "invalid value",
-				expectedErrorRegex:   "Invalid value.+",
-			},
-		},
-
 		// KPR true: all options enabled, host routing disabled.
 		{
 			"kpr-true",
@@ -145,7 +153,6 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				enableNodePort:          true,
 				enableHostPort:          true,
 				enableExternalIPs:       true,
-				enableSessionAffinity:   true,
 				enableHostLegacyRouting: false,
 				enableSocketLBTracing:   true,
 			},
@@ -163,7 +170,6 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				enableNodePort:          true,
 				enableHostPort:          true,
 				enableExternalIPs:       true,
-				enableSessionAffinity:   true,
 				enableHostLegacyRouting: false,
 				enableIPSec:             true,
 				enableSocketLBTracing:   true,
@@ -184,7 +190,6 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				enableNodePort:             true,
 				enableHostPort:             true,
 				enableExternalIPs:          true,
-				enableSessionAffinity:      true,
 				enableHostLegacyRouting:    false,
 				enableBPFMasquerade:        true,
 				enableIPv4Masquerade:       true,
@@ -207,7 +212,6 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				enableNodePort:             true,
 				enableHostPort:             true,
 				enableExternalIPs:          true,
-				enableSessionAffinity:      true,
 				enableHostLegacyRouting:    false,
 				installNoConntrackIptRules: true,
 				enableIPv4Masquerade:       true,
@@ -226,9 +230,8 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				enableNodePort:          false,
 				enableHostPort:          false,
 				enableExternalIPs:       false,
-				enableSessionAffinity:   false,
 				enableIPSec:             false,
-				enableHostLegacyRouting: false,
+				enableHostLegacyRouting: true,
 				enableSocketLBTracing:   false,
 				expectedErrorRegex:      "",
 			},
@@ -248,7 +251,6 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				enableNodePort:             true,
 				enableHostPort:             false,
 				enableExternalIPs:          false,
-				enableSessionAffinity:      false,
 				enableHostLegacyRouting:    false,
 				installNoConntrackIptRules: true,
 				enableSocketLBTracing:      true,
@@ -261,8 +263,8 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				cfg.kubeProxyReplacement = option.KubeProxyReplacementTrue
 				cfg.routingMode = option.RoutingModeTunnel
 				cfg.tunnelProtocol = tunnel.VXLAN
-				cfg.nodePortMode = option.NodePortModeDSR
-				cfg.dispatchMode = option.DSRDispatchOption
+				cfg.nodePortMode = loadbalancer.LBModeDSR
+				cfg.dispatchMode = loadbalancer.DSRDispatchOption
 			},
 			kprConfig{
 				expectedErrorRegex:      "Node Port .+ mode cannot be used with .+ tunneling.",
@@ -270,7 +272,6 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				enableNodePort:          true,
 				enableHostPort:          true,
 				enableExternalIPs:       true,
-				enableSessionAffinity:   true,
 				enableHostLegacyRouting: false,
 				enableSocketLBTracing:   true,
 			},
@@ -283,15 +284,14 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				cfg.kubeProxyReplacement = option.KubeProxyReplacementTrue
 				cfg.routingMode = option.RoutingModeNative
 				cfg.tunnelProtocol = tunnel.Geneve
-				cfg.nodePortMode = option.NodePortModeDSR
-				cfg.dispatchMode = option.DSRDispatchGeneve
+				cfg.nodePortMode = loadbalancer.LBModeDSR
+				cfg.dispatchMode = loadbalancer.DSRDispatchGeneve
 			},
 			kprConfig{
 				enableSocketLB:          true,
 				enableNodePort:          true,
 				enableHostPort:          true,
 				enableExternalIPs:       true,
-				enableSessionAffinity:   true,
 				enableHostLegacyRouting: false,
 				enableSocketLBTracing:   true,
 			},
@@ -303,15 +303,14 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				cfg.kubeProxyReplacement = option.KubeProxyReplacementTrue
 				cfg.routingMode = option.RoutingModeTunnel
 				cfg.tunnelProtocol = tunnel.Geneve
-				cfg.nodePortMode = option.NodePortModeDSR
-				cfg.dispatchMode = option.DSRDispatchGeneve
+				cfg.nodePortMode = loadbalancer.LBModeDSR
+				cfg.dispatchMode = loadbalancer.DSRDispatchGeneve
 			},
 			kprConfig{
 				enableSocketLB:          true,
 				enableNodePort:          true,
 				enableHostPort:          true,
 				enableExternalIPs:       true,
-				enableSessionAffinity:   true,
 				enableHostLegacyRouting: false,
 				enableSocketLBTracing:   true,
 			},
@@ -323,8 +322,8 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				cfg.kubeProxyReplacement = option.KubeProxyReplacementTrue
 				cfg.routingMode = option.RoutingModeTunnel
 				cfg.tunnelProtocol = tunnel.VXLAN
-				cfg.nodePortMode = option.NodePortModeDSR
-				cfg.dispatchMode = option.DSRDispatchGeneve
+				cfg.nodePortMode = loadbalancer.LBModeDSR
+				cfg.dispatchMode = loadbalancer.DSRDispatchGeneve
 			},
 			kprConfig{
 				expectedErrorRegex:      "Node Port .+ mode cannot be used with .+ tunneling.",
@@ -332,7 +331,6 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				enableNodePort:          true,
 				enableHostPort:          true,
 				enableExternalIPs:       true,
-				enableSessionAffinity:   true,
 				enableHostLegacyRouting: false,
 				enableSocketLBTracing:   true,
 			},
@@ -345,15 +343,14 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				cfg.kubeProxyReplacement = option.KubeProxyReplacementTrue
 				cfg.routingMode = option.RoutingModeNative
 				cfg.tunnelProtocol = tunnel.Geneve
-				cfg.nodePortMode = option.NodePortModeHybrid
-				cfg.dispatchMode = option.DSRDispatchGeneve
+				cfg.nodePortMode = loadbalancer.LBModeHybrid
+				cfg.dispatchMode = loadbalancer.DSRDispatchGeneve
 			},
 			kprConfig{
 				enableSocketLB:          true,
 				enableNodePort:          true,
 				enableHostPort:          true,
 				enableExternalIPs:       true,
-				enableSessionAffinity:   true,
 				enableHostLegacyRouting: false,
 				enableSocketLBTracing:   true,
 			},
@@ -365,15 +362,14 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				cfg.kubeProxyReplacement = option.KubeProxyReplacementTrue
 				cfg.routingMode = option.RoutingModeTunnel
 				cfg.tunnelProtocol = tunnel.Geneve
-				cfg.nodePortMode = option.NodePortModeHybrid
-				cfg.dispatchMode = option.DSRDispatchGeneve
+				cfg.nodePortMode = loadbalancer.LBModeHybrid
+				cfg.dispatchMode = loadbalancer.DSRDispatchGeneve
 			},
 			kprConfig{
 				enableSocketLB:          true,
 				enableNodePort:          true,
 				enableHostPort:          true,
 				enableExternalIPs:       true,
-				enableSessionAffinity:   true,
 				enableHostLegacyRouting: false,
 				enableSocketLBTracing:   true,
 			},
@@ -385,8 +381,8 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				cfg.kubeProxyReplacement = option.KubeProxyReplacementTrue
 				cfg.routingMode = option.RoutingModeTunnel
 				cfg.tunnelProtocol = tunnel.VXLAN
-				cfg.nodePortMode = option.NodePortModeHybrid
-				cfg.dispatchMode = option.DSRDispatchGeneve
+				cfg.nodePortMode = loadbalancer.LBModeHybrid
+				cfg.dispatchMode = loadbalancer.DSRDispatchGeneve
 			},
 			kprConfig{
 				expectedErrorRegex:      "Node Port .+ mode cannot be used with .+ tunneling.",
@@ -394,7 +390,6 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				enableNodePort:          true,
 				enableHostPort:          true,
 				enableExternalIPs:       true,
-				enableSessionAffinity:   true,
 				enableHostLegacyRouting: false,
 				enableSocketLBTracing:   true,
 			},
@@ -407,8 +402,8 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 		t.Logf("Testing %s", testCase.name)
 		cfg := def
 		testCase.mod(&cfg)
-		cfg.set()
-		testCase.out.verify(t, tunnel.NewTestConfig(cfg.tunnelProtocol))
+		require.NoError(t, cfg.set())
+		testCase.out.verify(t, cfg.lbConfig, cfg.kprConfig, tunnel.NewTestConfig(cfg.tunnelProtocol), fakeTypes.WireguardConfig{})
 		def.set()
 	}
 }

@@ -8,11 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
+	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/testutils"
 	"github.com/cilium/cilium/pkg/testutils/netns"
 )
@@ -44,10 +46,10 @@ func testReplaceNexthopRoute(t *testing.T, link netlink.Link, routerNet *net.IPN
 	require.NoError(t, err)
 }
 
-func TestReplaceNexthopRoute(t *testing.T) {
+func TestPrivilegedReplaceNexthopRoute(t *testing.T) {
 	setup(t)
 
-	link, err := netlink.LinkByName("lo")
+	link, err := safenetlink.LinkByName("lo")
 	require.NoError(t, err)
 
 	_, routerNet, err := net.ParseCIDR("1.2.3.4/32")
@@ -84,7 +86,7 @@ func testReplaceRoute(t *testing.T, prefixStr, nexthopStr string, lookupTest boo
 		Scope:  netlink.SCOPE_LINK,
 	})
 
-	err = Upsert(rt)
+	err = Upsert(hivetest.Logger(t), rt)
 	require.NoError(t, err)
 
 	if lookupTest {
@@ -101,7 +103,7 @@ func testReplaceRoute(t *testing.T, prefixStr, nexthopStr string, lookupTest boo
 	require.NoError(t, err)
 }
 
-func TestReplaceRoute(t *testing.T) {
+func TestPrivilegedReplaceRoute(t *testing.T) {
 	setup(t)
 
 	testReplaceRoute(t, "2.2.0.0/16", "1.2.3.4", true)
@@ -159,7 +161,7 @@ func testReplaceRuleIPv6(t *testing.T, mark uint32, from, to *net.IPNet, table i
 	require.False(t, exists)
 }
 
-func TestReplaceRule(t *testing.T) {
+func TestPrivilegedReplaceRule(t *testing.T) {
 	setup(t)
 
 	_, cidr1, err := net.ParseCIDR("10.10.0.0/16")
@@ -170,7 +172,7 @@ func TestReplaceRule(t *testing.T) {
 	testReplaceRule(t, 0, cidr1, cidr1, 126)
 }
 
-func TestReplaceRule6(t *testing.T) {
+func TestPrivilegedReplaceRule6(t *testing.T) {
 	setup(t)
 
 	_, cidr1, err := net.ParseCIDR("beef::/48")
@@ -181,7 +183,7 @@ func TestReplaceRule6(t *testing.T) {
 	testReplaceRuleIPv6(t, 0, cidr1, cidr1, 126)
 }
 
-func TestRule_String(t *testing.T) {
+func TestPrivilegedRule_String(t *testing.T) {
 	setup(t)
 
 	_, fakeIP, _ := net.ParseCIDR("10.10.10.10/32")
@@ -237,7 +239,7 @@ func TestRule_String(t *testing.T) {
 	}
 }
 
-func TestListRules(t *testing.T) {
+func TestPrivilegedListRules(t *testing.T) {
 	testutils.PrivilegedTest(t)
 
 	testListRules4(t)

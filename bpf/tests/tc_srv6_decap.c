@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 /* Copyright Authors of Cilium */
 
-#include "common.h"
 #include <bpf/ctx/skb.h>
-#include <linux/in.h>
+#include "common.h"
 #include "pktgen.h"
 
 /* Enable code paths under test */
@@ -122,7 +121,7 @@ int srv6_decap_to_pod_ipv4_setup(struct __ctx_buff *ctx __maybe_unused)
 
 	memcpy(sid.addr, (const void *)SID, sizeof(sid.addr));
 
-	map_update_elem(&SRV6_SID_MAP, &sid, &vrf_id, 0);
+	map_update_elem(&cilium_srv6_sid, &sid, &vrf_id, 0);
 
 	endpoint_v4_add_entry(POD_IPV4, 12345, 100, 0, 0, 0,
 			      (__u8 *)POD_MAC, (__u8 *)ROUTER_MAC);
@@ -260,7 +259,7 @@ int srv6_decap_to_pod_ipv6_setup(struct __ctx_buff *ctx __maybe_unused)
 
 	memcpy(sid.addr, (const void *)SID, sizeof(sid.addr));
 
-	map_update_elem(&SRV6_SID_MAP, &sid, &vrf_id, 0);
+	map_update_elem(&cilium_srv6_sid, &sid, &vrf_id, 0);
 
 	endpoint_v6_add_entry((const union v6addr *)POD_IPV6, 12345, 100, 0, 0,
 			      (__u8 *)POD_MAC, (__u8 *)ROUTER_MAC);
@@ -399,7 +398,7 @@ int srv6_decap_to_service_ipv4_setup(struct __ctx_buff *ctx __maybe_unused)
 
 	memcpy(sid.addr, (const void *)SID, sizeof(sid.addr));
 
-	map_update_elem(&SRV6_SID_MAP, &sid, &vrf_id, 0);
+	map_update_elem(&cilium_srv6_sid, &sid, &vrf_id, 0);
 
 	lb_v4_add_service(SERVICE_IPV4, SERVICE_PORT, IPPROTO_TCP, 1, 1);
 	lb_v4_add_backend(SERVICE_IPV4, SERVICE_PORT, 1, 124,
@@ -542,7 +541,7 @@ int srv6_decap_to_service_ipv6_setup(struct __ctx_buff *ctx __maybe_unused)
 
 	memcpy(sid.addr, (const void *)SID, sizeof(sid.addr));
 
-	map_update_elem(&SRV6_SID_MAP, &sid, &vrf_id, 0);
+	map_update_elem(&cilium_srv6_sid, &sid, &vrf_id, 0);
 
 	lb_v6_add_service((const union v6addr *)SERVICE_IPV6, SERVICE_PORT, IPPROTO_TCP, 1, 1);
 	lb_v6_add_backend((const union v6addr *)SERVICE_IPV6, SERVICE_PORT, 1, 124,

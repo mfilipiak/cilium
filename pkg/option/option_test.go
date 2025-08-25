@@ -79,7 +79,7 @@ func TestSetBool(t *testing.T) {
 	require.Equal(t, OptionEnabled, o.GetValue(k3))
 }
 
-func TestDelete(t *testing.T) {
+func TestPrivilegedDelete(t *testing.T) {
 	k1, k2 := "foo", "bar"
 
 	o := IntOptions{
@@ -423,7 +423,7 @@ func TestApplyValidated(t *testing.T) {
 		k6: OptionEnabled,
 	}
 	actualChanges := OptionMap{}
-	var changed ChangedFunc = func(key string, value OptionSetting, data interface{}) {
+	var changed ChangedFunc = func(key string, value OptionSetting, data any) {
 		require.Equal(t, &cfg, data)
 		actualChanges[key] = value
 	}

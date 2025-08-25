@@ -99,7 +99,7 @@ func (a *API) GetInstance(ctx context.Context, vpcs ipamTypes.VirtualNetworkMap,
 		}
 		for ifaceID, eni := range enis {
 			if subnets != nil {
-				if subnet, ok := subnets[eni.VSwitch.VSwitchID]; ok && subnet.CIDR != nil {
+				if subnet, ok := subnets[eni.VSwitch.VSwitchID]; ok && subnet.CIDR.IsValid() {
 					eni.VSwitch.CIDRBlock = subnet.CIDR.String()
 					eni.ZoneID = subnet.AvailabilityZone
 				}
@@ -129,7 +129,7 @@ func (a *API) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetworkMap
 	for instanceID, enis := range a.enis {
 		for _, eni := range enis {
 			if subnets != nil {
-				if subnet, ok := subnets[eni.VSwitch.VSwitchID]; ok && subnet.CIDR != nil {
+				if subnet, ok := subnets[eni.VSwitch.VSwitchID]; ok && subnet.CIDR.IsValid() {
 					eni.VSwitch.CIDRBlock = subnet.CIDR.String()
 					eni.ZoneID = subnet.AvailabilityZone
 				}
@@ -219,7 +219,7 @@ func (a *API) CreateNetworkInterface(ctx context.Context, secondaryPrivateIPCoun
 		SecurityGroupIDs: groups,
 		Tags:             tags,
 	}
-	for i := 0; i < secondaryPrivateIPCount+1; i++ {
+	for range secondaryPrivateIPCount + 1 {
 		ip, err := a.allocator.AllocateNext()
 		if err != nil {
 			panic("Unable to allocate IP from allocator")
@@ -293,7 +293,7 @@ func (a *API) AssignPrivateIPAddresses(ctx context.Context, eniID string, toAllo
 				return nil, fmt.Errorf("vSwitch %s don't have enough addresses available", eni.VSwitch.VSwitchID)
 			}
 
-			for i := 0; i < toAllocate; i++ {
+			for range toAllocate {
 				ip, err := a.allocator.AllocateNext()
 				if err != nil {
 					panic("Unable to allocate IP from allocator")

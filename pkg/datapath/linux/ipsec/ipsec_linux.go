@@ -7,6 +7,7 @@ package ipsec
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/sha512"
@@ -22,7 +23,6 @@ import (
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/job"
-	"github.com/fsnotify/fsnotify"
 	"github.com/prometheus/procfs"
 	"github.com/vishvananda/netlink"
 
@@ -83,11 +83,12 @@ const (
 )
 
 type ipSecKey struct {
-	Spi   uint8
-	ReqID int
-	Auth  *netlink.XfrmStateAlgo
-	Crypt *netlink.XfrmStateAlgo
-	Aead  *netlink.XfrmStateAlgo
+	Spi    uint8
+	KeyLen int
+	ReqID  int
+	Auth   *netlink.XfrmStateAlgo
+	Crypt  *netlink.XfrmStateAlgo
+	Aead   *netlink.XfrmStateAlgo
 }
 
 type oldXfrmStateKey struct {
@@ -253,7 +254,7 @@ func canonicalIP(ip net.IP) net.IP {
 
 // deriveNodeIPsecKey builds a per-node-pair ipSecKey object from the global
 // ipSecKey object.
-func deriveNodeIPsecKey(globalKey *ipSecKey, srcNodeIP, dstNodeIP net.IP, srcBootID, dstBootID string) *ipSecKey {
+func deriveNodeIPsecKey(globalKey *ipSecKey, srcNodeIP, dstNodeIP net.IP, srcBootID, dstBootID []byte) *ipSecKey {
 	nodeKey := &ipSecKey{
 		Spi:   globalKey.Spi,
 		ReqID: globalKey.ReqID,
@@ -265,18 +266,18 @@ func deriveNodeIPsecKey(globalKey *ipSecKey, srcNodeIP, dstNodeIP net.IP, srcBoo
 	if globalKey.Aead != nil {
 		nodeKey.Aead = &netlink.XfrmStateAlgo{
 			Name:   globalKey.Aead.Name,
-			Key:    computeNodeIPsecKey(globalKey.Aead.Key, srcNodeIP, dstNodeIP, []byte(srcBootID), []byte(dstBootID)),
+			Key:    computeNodeIPsecKey(globalKey.Aead.Key, srcNodeIP, dstNodeIP, srcBootID, dstBootID),
 			ICVLen: globalKey.Aead.ICVLen,
 		}
 	} else {
 		nodeKey.Auth = &netlink.XfrmStateAlgo{
 			Name: globalKey.Auth.Name,
-			Key:  computeNodeIPsecKey(globalKey.Auth.Key, srcNodeIP, dstNodeIP, []byte(srcBootID), []byte(dstBootID)),
+			Key:  computeNodeIPsecKey(globalKey.Auth.Key, srcNodeIP, dstNodeIP, srcBootID, dstBootID),
 		}
 
 		nodeKey.Crypt = &netlink.XfrmStateAlgo{
 			Name: globalKey.Crypt.Name,
-			Key:  computeNodeIPsecKey(globalKey.Crypt.Key, srcNodeIP, dstNodeIP, []byte(srcBootID), []byte(dstBootID)),
+			Key:  computeNodeIPsecKey(globalKey.Crypt.Key, srcNodeIP, dstNodeIP, srcBootID, dstBootID),
 		}
 	}
 
@@ -292,13 +293,19 @@ func deriveNodeIPsecKey(globalKey *ipSecKey, srcNodeIP, dstNodeIP net.IP, srcBoo
 // This is done such that, for each pair of nodes A, B, the key used for
 // decryption on A (XFRM IN) is the same key used for encryption on B (XFRM
 // OUT), and vice versa. And its key automatically resets on each node reboot.
-func getNodeIPsecKey(localNodeIP, remoteNodeIP net.IP, srcBootID, dstBootID string) *ipSecKey {
+func getNodeIPsecKey(localNodeIP, remoteNodeIP net.IP, srcBootID, dstBootID string) (*ipSecKey, error) {
 	globalKey := getGlobalIPsecKey(localNodeIP)
 	if globalKey == nil {
-		return nil
+		return nil, fmt.Errorf("global IPsec key missing")
 	}
 
-	return deriveNodeIPsecKey(globalKey, localNodeIP, remoteNodeIP, srcBootID, dstBootID)
+	srcBootIDBytes := []byte(srcBootID)
+	dstBootIDBytes := []byte(dstBootID)
+	if len(srcBootIDBytes) < 36 || len(dstBootIDBytes) < 36 {
+		return nil, fmt.Errorf("incorrect size for boot ID, should be at least 36 characters long")
+	}
+
+	return deriveNodeIPsecKey(globalKey, localNodeIP, remoteNodeIP, srcBootIDBytes, dstBootIDBytes), nil
 }
 
 func ipSecNewState(keys *ipSecKey) *netlink.XfrmState {
@@ -511,9 +518,9 @@ func xfrmMarkEqual(mark1, mark2 *netlink.XfrmMark) bool {
 }
 
 func ipSecReplaceStateIn(log *slog.Logger, params *IPSecParameters) (uint8, error) {
-	key := getNodeIPsecKey(*params.SourceTunnelIP, *params.DestTunnelIP, params.RemoteBootID, params.LocalBootID)
-	if key == nil {
-		return 0, fmt.Errorf("IPSec key missing")
+	key, err := getNodeIPsecKey(*params.SourceTunnelIP, *params.DestTunnelIP, params.RemoteBootID, params.LocalBootID)
+	if err != nil {
+		return 0, err
 	}
 	key.ReqID = params.ReqID
 	state := ipSecNewState(key)
@@ -539,9 +546,9 @@ func ipSecReplaceStateIn(log *slog.Logger, params *IPSecParameters) (uint8, erro
 }
 
 func ipSecReplaceStateOut(log *slog.Logger, params *IPSecParameters) (uint8, error) {
-	key := getNodeIPsecKey(*params.SourceTunnelIP, *params.DestTunnelIP, params.LocalBootID, params.RemoteBootID)
-	if key == nil {
-		return 0, fmt.Errorf("IPSec key missing")
+	key, err := getNodeIPsecKey(*params.SourceTunnelIP, *params.DestTunnelIP, params.LocalBootID, params.RemoteBootID)
+	if err != nil {
+		return 0, err
 	}
 	key.ReqID = params.ReqID
 	state := ipSecNewState(key)
@@ -678,6 +685,10 @@ func ipSecReplacePolicyOut(params *IPSecParameters) error {
 func matchesOnNodeID(mark *netlink.XfrmMark) bool {
 	return mark != nil &&
 		mark.Mask&linux_defaults.IPsecMarkMaskNodeID == linux_defaults.IPsecMarkMaskNodeID
+}
+
+func matchesOnDst(a *net.IPNet, b *net.IPNet) bool {
+	return a.IP.Equal(b.IP) && bytes.Equal(a.Mask, b.Mask)
 }
 
 func ipsecDeleteXfrmState(log *slog.Logger, nodeID uint16) error {
@@ -973,6 +984,38 @@ policy:
 	return ee.Error()
 }
 
+// DeleteXfrmPolicyOut will remove XFRM OUT policies by their node ID and destination subnet.
+func DeleteXfrmPolicyOut(log *slog.Logger, nodeID uint16, dst *net.IPNet) error {
+	if dst.IP.To4() != nil {
+		return deleteXfrmPolicyOutFamily(log, nodeID, dst, netlink.FAMILY_V4)
+	} else {
+		return deleteXfrmPolicyOutFamily(log, nodeID, dst, netlink.FAMILY_V6)
+	}
+}
+
+func deleteXfrmPolicyOutFamily(log *slog.Logger, nodeID uint16, dst *net.IPNet, family int) error {
+	xfrmPolicyList, err := safenetlink.XfrmPolicyList(family)
+	if err != nil {
+		log.Warn("Failed to list XFRM OUT policies for deletion", logfields.Error, err)
+		return fmt.Errorf("failed to list xfrm out policies: %w", err)
+	}
+	errs := resiliency.NewErrorSet("failed to delete xfrm out policies", len(xfrmPolicyList))
+	for _, p := range xfrmPolicyList {
+		if !matchesOnNodeID(p.Mark) || ipsec.GetNodeIDFromXfrmMark(p.Mark) != nodeID || !matchesOnDst(p.Dst, dst) {
+			continue
+		}
+		if err := netlink.XfrmPolicyDel(&p); err != nil {
+			errs.Add(fmt.Errorf("unable to delete xfrm out policy %s: %w", p.String(), err))
+		}
+	}
+	if err := errs.Error(); err != nil {
+		log.Warn("Failed to delete XFRM OUT policy", logfields.Error, err)
+		return err
+	}
+
+	return nil
+}
+
 func decodeIPSecKey(keyRaw string) (int, []byte, error) {
 	// As we have released the v1.4.0 docs telling the users to write the
 	// k8s secret with the prefix "0x" we have to remove it if it is present,
@@ -1097,10 +1140,14 @@ func LoadIPSecKeys(log *slog.Logger, r io.Reader) (int, uint8, error) {
 		}
 
 		ipSecKey.Spi = spi
+		ipSecKey.KeyLen = keyLen
 
 		if oldKey, ok := ipSecKeysGlobal[""]; ok {
 			if oldKey.Spi == spi {
 				return 0, 0, fmt.Errorf("invalid SPI: changing IPSec keys requires incrementing the key id")
+			}
+			if oldKey.KeyLen != keyLen {
+				return 0, 0, fmt.Errorf("invalid key rotation: key length must not change")
 			}
 			ipSecKeysRemovalTime[oldKey.Spi] = time.Now()
 		}
@@ -1154,7 +1201,7 @@ func DeleteIPsecEncryptRoute(log *slog.Logger) {
 		for _, rt := range routes {
 			if err := netlink.RouteDel(&rt); err != nil {
 				log.Warn("Unable to delete ipsec encrypt route",
-					logfields.Route, rt.String(),
+					logfields.Route, rt,
 					logfields.Error, err,
 				)
 			}
@@ -1166,7 +1213,7 @@ func keyfileWatcher(log *slog.Logger, ctx context.Context, watcher *fswatcher.Wa
 	for {
 		select {
 		case event := <-watcher.Events:
-			if event.Op&(fsnotify.Create|fsnotify.Write) == 0 {
+			if event.Op&(fswatcher.Create|fswatcher.Write) == 0 {
 				continue
 			}
 
@@ -1216,7 +1263,7 @@ func StartKeyfileWatcher(log *slog.Logger, group job.Group, keyfilePath string, 
 		return nil
 	}
 
-	watcher, err := fswatcher.New([]string{keyfilePath})
+	watcher, err := fswatcher.New(log, []string{keyfilePath})
 	if err != nil {
 		return err
 	}

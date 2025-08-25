@@ -113,18 +113,21 @@ func nonUniqueSeq[Obj any](iter *part.Iterator[object], prefixSearch bool, searc
 				break
 			}
 
-			secondary, primary := decodeNonUniqueKey(key)
+			nuk := nonUniqueKey(key)
+			secondaryLen := nuk.secondaryLen()
 
 			switch {
-			case !prefixSearch && len(secondary) != len(searchKey):
+			case !prefixSearch && secondaryLen != len(searchKey):
 				// This a List(), thus secondary key must match length exactly.
 				continue
-			case prefixSearch && len(secondary) < len(searchKey):
+			case prefixSearch && secondaryLen < len(searchKey):
 				// This is Prefix(), thus key must be equal or longer to search key.
 				continue
 			}
 
 			if prefixSearch {
+				primary := nuk.encodedPrimary()
+
 				// When doing a prefix search on a non-unique index we may see the
 				// same object multiple times since multiple keys may point it.
 				// Skip if we've already seen this object.
@@ -157,8 +160,10 @@ func nonUniqueLowerBoundSeq[Obj any](iter *part.Iterator[object], searchKey []by
 			// With a non-unique index we have a composite key <secondary><primary><secondary len>.
 			// This means we need to check every key that it's larger or equal to the search key.
 			// Just seeking to the first one isn't enough as the secondary key length may vary.
-			secondary, primary := decodeNonUniqueKey(key)
+			nuk := nonUniqueKey(key)
+			secondary := nuk.encodedSecondary()
 			if bytes.Compare(secondary, searchKey) >= 0 {
+				primary := nuk.encodedPrimary()
 				if _, found := visited[string(primary)]; found {
 					continue
 				}
@@ -266,11 +271,10 @@ func (it *changeIterator[Obj]) refresh(txn ReadTxn) {
 	// refresh from mutated indexes in case [txn] is a WriteTxn. This
 	// is important as the WriteTxn may be aborted and thus revisions will
 	// reset back and watermarks bumped from here would be invalid.
-	itxn := txn.getTxn()
-	indexEntry := itxn.root[it.table.tablePos()].indexes[RevisionIndexPos]
+	indexEntry := txn.root()[it.table.tablePos()].indexes[RevisionIndexPos]
 	indexTxn := indexReadTxn{indexEntry.tree, indexEntry.unique}
 	updateIter := &iterator[Obj]{indexTxn.LowerBound(index.Uint64(it.revision + 1))}
-	deleteIter := it.dt.deleted(itxn, it.deleteRevision+1)
+	deleteIter := it.dt.deleted(txn, it.deleteRevision+1)
 	it.iter = NewDualIterator(deleteIter, updateIter)
 
 	// It is enough to watch the revision index and not the graveyard since

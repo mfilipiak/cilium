@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 /* Copyright Authors of Cilium */
 
+#include <bpf/ctx/skb.h>
 #include "common.h"
 
 /* Enable debug output */
@@ -9,8 +10,8 @@
 /* Enable CT debug output */
 #undef QUIET_CT
 
-#include <bpf/ctx/skb.h>
 #include "pktgen.h"
+#include "scapy.h"
 
 /* Enable code paths under test */
 #define ENABLE_IPV4
@@ -18,17 +19,7 @@
 
 #include <bpf_host.c>
 
-ASSIGN_CONFIG(__u32, host_secctx_from_ipcache, 1)
-
-/* Hack: Set the interface mac to mac_two.
- *
- * Note: MAC addresses are defined in network endianness in this test suite,
- * while the fetch_mac and friends encode things in a way where they end up in
- * memory in native endianness. Remove this in favor of a normal assignment when
- * making interface_mac an array, this will stop compiling anyway.
- */
-ASSIGN_CONFIG(__u32, interface_mac_1, bpf_htonl(0x13371337))
-ASSIGN_CONFIG(__u16, interface_mac_2, bpf_htons(0x1337))
+ASSIGN_CONFIG(union macaddr, interface_mac, {.addr = mac_two_addr})
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
@@ -50,40 +41,14 @@ struct {
  *                 +-------------------------------------------------------------------+
  */
 
-static volatile const __u8 mac_bcast[] =   {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-
 static __always_inline int build_packet(struct __ctx_buff *ctx)
 {
 	struct pktgen builder;
-	volatile const __u8 *src = mac_one;
-	volatile const __u8 *dst = mac_bcast;
-	struct ethhdr *l2;
-	struct arphdreth *l3;
-
-	/* Init packet builder */
 	pktgen__init(&builder, ctx);
 
-	/* Push ethernet header */
-	l2 = pktgen__push_ethhdr(&builder);
+	BUF_DECL(ARP_REQ, l2_announce_arp_req);
+	BUILDER_PUSH_BUF(builder, ARP_REQ);
 
-	if (!l2)
-		return TEST_ERROR;
-
-	ethhdr__set_macs(l2, (__u8 *)src, (__u8 *)dst);
-
-	/* Push ARP header */
-	l3 = pktgen__push_default_arphdr_ethernet(&builder);
-
-	if (!l3)
-		return TEST_ERROR;
-
-	l3->ar_op = bpf_htons(ARPOP_REQUEST);
-	memcpy(l3->ar_sha, (__u8 *)mac_one, ETH_ALEN);
-	l3->ar_sip = v4_ext_one;
-	memcpy(l3->ar_tha, (__u8 *)mac_bcast, ETH_ALEN);
-	l3->ar_tip = v4_svc_one;
-
-	/* Calc lengths, set protocol fields and calc checksums */
 	pktgen__finish(&builder);
 
 	return 0;
@@ -112,8 +77,6 @@ int l2_announcement_arp_no_entry_check(__maybe_unused const struct __ctx_buff *c
 	void *data;
 	void *data_end;
 	__u32 *status_code;
-	struct ethhdr *l2;
-	struct arphdreth *l3;
 
 	test_init();
 
@@ -125,27 +88,14 @@ int l2_announcement_arp_no_entry_check(__maybe_unused const struct __ctx_buff *c
 
 	status_code = data;
 
-	/* The program should pass unknown ARP messages to the stack */
 	assert(*status_code == TC_ACT_OK);
 
-	l2 = data + sizeof(__u32);
-	if ((void *)l2 + sizeof(struct ethhdr) > data_end)
-		test_fatal("l2 out of bounds");
-
-	l3 = data + sizeof(__u32) + sizeof(struct ethhdr);
-
-	if ((void *)l3 + sizeof(struct arphdreth) > data_end)
-		test_fatal("l3 out of bounds");
-
-	assert(memcmp(l2->h_source, (__u8 *)mac_one, ETH_ALEN) == 0);
-	assert(memcmp(l2->h_dest, (__u8 *)mac_bcast, ETH_ALEN) == 0);
-	assert(l3->ar_op == bpf_htons(ARPOP_REQUEST));
-	assert(l3->ar_sip == v4_ext_one);
-	assert(l3->ar_tip == v4_svc_one);
-	assert(memcmp(l3->ar_sha, (__u8 *)mac_one, ETH_ALEN) == 0);
-	assert(memcmp(l3->ar_tha, (__u8 *)mac_bcast, ETH_ALEN) == 0);
-
+	BUF_DECL(EXPECTED_ARP_REQ, l2_announce_arp_req);
+	ASSERT_CTX_BUF_OFF("arp_req_no_entry_untouched", "Ether", ctx,
+			   sizeof(__u32), EXPECTED_ARP_REQ,
+			   sizeof(BUF(EXPECTED_ARP_REQ)));
 	test_finish();
+
 }
 
 PKTGEN("tc", "1_happy_path")
@@ -154,24 +104,20 @@ int l2_announcement_arp_happy_path_pktgen(struct __ctx_buff *ctx)
 	return build_packet(ctx);
 }
 
-/* Test that sending a ARP broadcast request matching an entry in the
- * L2_RESPONDER_MAP4 results in a valid ARP reply.
+/* Test that sending a ARP broadcast request matching an entry in
+ * cilium_l2_responder_v4 results in a valid ARP reply.
  */
 SETUP("tc", "1_happy_path")
 int l2_announcement_arp_happy_path_setup(struct __ctx_buff *ctx)
 {
 	struct l2_responder_v4_key key;
-	struct l2_responder_v4_stats value = {0};
-	__u32 index;
-	__u64 time;
+	struct l2_responder_stats value = {0};
 
 	key.ifindex = 0;
 	key.ip4 = v4_svc_one;
-	map_update_elem(&L2_RESPONDER_MAP4, &key, &value, BPF_ANY);
+	map_update_elem(&cilium_l2_responder_v4, &key, &value, BPF_ANY);
 
-	index = RUNTIME_CONFIG_AGENT_LIVENESS;
-	time = ktime_get_ns();
-	map_update_elem(&CONFIG_MAP, &index, &time, BPF_ANY);
+	config_set(RUNTIME_CONFIG_AGENT_LIVENESS, ktime_get_ns());
 
 	/* Jump into the entrypoint */
 	tail_call_static(ctx, entry_call_map, 0);
@@ -185,8 +131,6 @@ int l2_announcement_arp_happy_path_check(__maybe_unused const struct __ctx_buff 
 	void *data;
 	void *data_end;
 	__u32 *status_code;
-	struct ethhdr *l2;
-	struct arphdreth *l3;
 
 	test_init();
 
@@ -200,22 +144,9 @@ int l2_announcement_arp_happy_path_check(__maybe_unused const struct __ctx_buff 
 
 	assert(*status_code == TC_ACT_REDIRECT);
 
-	l2 = data + sizeof(__u32);
-	if ((void *)l2 + sizeof(struct ethhdr) > data_end)
-		test_fatal("l2 out of bounds");
+	BUF_DECL(EXPECTED_ARP_REP, l2_announce_arp_reply);
 
-	l3 = data + sizeof(__u32) + sizeof(struct ethhdr);
-
-	if ((void *)l3 + sizeof(struct arphdreth) > data_end)
-		test_fatal("l3 out of bounds");
-
-	assert(memcmp(l2->h_source, (__u8 *)mac_two, ETH_ALEN) == 0);
-	assert(memcmp(l2->h_dest, (__u8 *)mac_one, ETH_ALEN) == 0);
-	assert(l3->ar_op == bpf_htons(ARPOP_REPLY));
-	assert(l3->ar_sip == v4_svc_one);
-	assert(l3->ar_tip == v4_ext_one);
-	assert(memcmp(l3->ar_sha, (__u8 *)mac_two, ETH_ALEN) == 0);
-	assert(memcmp(l3->ar_tha, (__u8 *)mac_one, ETH_ALEN) == 0);
-
+	ASSERT_CTX_BUF_OFF("arp_rep_ok", "Ether", ctx, sizeof(__u32),
+			   EXPECTED_ARP_REP, sizeof(BUF(EXPECTED_ARP_REP)));
 	test_finish();
 }

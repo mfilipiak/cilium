@@ -6,12 +6,14 @@ package k8s
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 
 	"github.com/cilium/hive/cell"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/cilium/cilium/pkg/k8s"
 	cilium_api_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	cilium_api_v2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/client"
@@ -36,7 +38,7 @@ func CiliumEndpointResource(lc cell.Lifecycle, cs client.Clientset, opts ...func
 		lc, lw, resource.WithMetric("CiliumEndpoint"), resource.WithIndexers(indexers)), nil
 }
 
-func identityIndexFunc(obj interface{}) ([]string, error) {
+func identityIndexFunc(obj any) ([]string, error) {
 	switch t := obj.(type) {
 	case *cilium_api_v2.CiliumEndpoint:
 		if t.Status.Identity != nil {
@@ -117,4 +119,37 @@ func PodResource(lc cell.Lifecycle, cs client.Clientset, opts ...func(*metav1.Li
 			resource.WithIndexers(indexers),
 		),
 		nil
+}
+
+func LBIPPoolsResource(lc cell.Lifecycle, cs client.Clientset, opts ...func(*metav1.ListOptions)) (resource.Resource[*cilium_api_v2.CiliumLoadBalancerIPPool], error) {
+	if !cs.IsEnabled() {
+		return nil, nil
+	}
+	lw := utils.ListerWatcherWithModifiers(
+		utils.ListerWatcherFromTyped(cs.CiliumV2().CiliumLoadBalancerIPPools()),
+		opts...,
+	)
+	return resource.New[*cilium_api_v2.CiliumLoadBalancerIPPool](lc, lw, resource.WithMetric("CiliumLoadBalancerIPPool")), nil
+}
+
+const ServiceIndex = "service"
+
+func EndpointsResource(logger *slog.Logger, lc cell.Lifecycle, cfg k8s.Config, cs client.Clientset) (resource.Resource[*k8s.Endpoints], error) {
+	return k8s.EndpointsResourceWithIndexers(
+		logger,
+		lc,
+		cfg,
+		cs,
+		cache.Indexers{
+			// Index endpoints by their service identifier. Used by [ServiceSyncCell].
+			ServiceIndex: func(obj any) ([]string, error) {
+				eps, ok := obj.(*k8s.Endpoints)
+				if !ok {
+					return nil, fmt.Errorf("unexpected object type: %T", obj)
+				}
+				return []string{eps.ServiceName.String()}, nil
+			},
+		},
+	)
+
 }

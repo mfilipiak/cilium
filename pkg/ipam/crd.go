@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"reflect"
 	"slices"
@@ -27,6 +28,7 @@ import (
 	"github.com/cilium/cilium/pkg/ip"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
+	"github.com/cilium/cilium/pkg/ipmasq"
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/k8s/client"
 	"github.com/cilium/cilium/pkg/k8s/informer"
@@ -120,7 +122,7 @@ func newNodeStore(logger *slog.Logger, nodeName string, conf *option.DaemonConfi
 		&ciliumv2.CiliumNode{},
 		0,
 		cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
+			AddFunc: func(obj any) {
 				var valid, equal bool
 				defer func() { k8sEventReg.K8sEventReceived(apiGroup, "CiliumNode", "create", valid, equal) }()
 				if node, ok := obj.(*ciliumv2.CiliumNode); ok {
@@ -135,7 +137,7 @@ func newNodeStore(logger *slog.Logger, nodeName string, conf *option.DaemonConfi
 					)
 				}
 			},
-			UpdateFunc: func(oldObj, newObj interface{}) {
+			UpdateFunc: func(oldObj, newObj any) {
 				var valid, equal bool
 				defer func() { k8sEventReg.K8sEventReceived(apiGroup, "CiliumNode", "update", valid, equal) }()
 				if oldNode, ok := oldObj.(*ciliumv2.CiliumNode); ok {
@@ -169,7 +171,7 @@ func newNodeStore(logger *slog.Logger, nodeName string, conf *option.DaemonConfi
 					)
 				}
 			},
-			DeleteFunc: func(obj interface{}) {
+			DeleteFunc: func(obj any) {
 				// Given we are watching a single specific
 				// resource using the node name, any delete
 				// notification means that the resource
@@ -304,7 +306,7 @@ func (n *nodeStore) autoDetectIPv4NativeRoutingCIDR(localNodeStore *node.LocalNo
 				logfields.VPCCIDR, primaryCIDR,
 			)
 			localNodeStore.Update(func(n *node.LocalNode) {
-				n.IPv4NativeRoutingCIDR = primaryCIDR
+				n.Local.IPv4NativeRoutingCIDR = primaryCIDR
 			})
 		}
 		return true
@@ -565,9 +567,7 @@ func (n *nodeStore) refreshNode() error {
 
 	for _, a := range staleCopyOfAllocators {
 		a.mutex.RLock()
-		for ip, ipInfo := range a.allocated {
-			node.Status.IPAM.Used[ip] = ipInfo
-		}
+		maps.Copy(node.Status.IPAM.Used, a.allocated)
 		a.mutex.RUnlock()
 	}
 
@@ -710,22 +710,24 @@ type crdAllocator struct {
 	// family is the address family this allocator is allocator for
 	family Family
 
-	conf   *option.DaemonConfig
-	logger *slog.Logger
+	conf        *option.DaemonConfig
+	logger      *slog.Logger
+	ipMasqAgent *ipmasq.IPMasqAgent
 }
 
 // newCRDAllocator creates a new CRD-backed IP allocator
-func newCRDAllocator(logger *slog.Logger, family Family, c *option.DaemonConfig, owner Owner, localNodeStore *node.LocalNodeStore, clientset client.Clientset, k8sEventReg K8sEventRegister, mtuConfig MtuConfiguration, sysctl sysctl.Sysctl) Allocator {
+func newCRDAllocator(logger *slog.Logger, family Family, c *option.DaemonConfig, owner Owner, localNodeStore *node.LocalNodeStore, clientset client.Clientset, k8sEventReg K8sEventRegister, mtuConfig MtuConfiguration, sysctl sysctl.Sysctl, ipMasqAgent *ipmasq.IPMasqAgent) Allocator {
 	initNodeStore.Do(func() {
 		sharedNodeStore = newNodeStore(logger, nodeTypes.GetName(), c, owner, localNodeStore, clientset, k8sEventReg, mtuConfig, sysctl)
 	})
 
 	allocator := &crdAllocator{
-		logger:    logger,
-		allocated: ipamTypes.AllocationMap{},
-		family:    family,
-		store:     sharedNodeStore,
-		conf:      c,
+		logger:      logger,
+		allocated:   ipamTypes.AllocationMap{},
+		family:      family,
+		store:       sharedNodeStore,
+		conf:        c,
+		ipMasqAgent: ipMasqAgent,
 	}
 
 	sharedNodeStore.addAllocator(allocator)
@@ -774,6 +776,19 @@ func (a *crdAllocator) buildAllocationResult(ip net.IP, ipInfo *ipamTypes.Alloca
 				// Add manually configured Native Routing CIDR
 				if a.conf.IPv4NativeRoutingCIDR != nil {
 					result.CIDRs = append(result.CIDRs, a.conf.IPv4NativeRoutingCIDR.String())
+				}
+				// If the ip-masq-agent is enabled, get the CIDRs that are not masqueraded.
+				// Note that the resulting ip rules will not be dynamically regenerated if the
+				// ip-masq-agent configuration changes.
+				if a.conf.EnableIPMasqAgent {
+					nonMasqCidrs := a.ipMasqAgent.NonMasqCIDRsFromConfig()
+					for _, prefix := range nonMasqCidrs {
+						if ip.To4() != nil && prefix.Addr().Is4() {
+							result.CIDRs = append(result.CIDRs, prefix.String())
+						} else if ip.To4() == nil && prefix.Addr().Is6() {
+							result.CIDRs = append(result.CIDRs, prefix.String())
+						}
+					}
 				}
 				if eni.Subnet.CIDR != "" {
 					// The gateway for a subnet and VPC is always x.x.x.1

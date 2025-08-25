@@ -5,13 +5,13 @@ package clustermesh
 
 import (
 	"context"
+	"log/slog"
 	"path"
-
-	"github.com/sirupsen/logrus"
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/allocator"
 	"github.com/cilium/cilium/pkg/clustermesh/common"
+	serviceStore "github.com/cilium/cilium/pkg/clustermesh/store"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/clustermesh/wait"
 	identityCache "github.com/cilium/cilium/pkg/identity/cache"
@@ -22,7 +22,6 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	nodeStore "github.com/cilium/cilium/pkg/node/store"
 	"github.com/cilium/cilium/pkg/option"
-	serviceStore "github.com/cilium/cilium/pkg/service/store"
 )
 
 // remoteCluster implements the clustermesh business logic on top of
@@ -73,7 +72,7 @@ type remoteCluster struct {
 	// synced tracks the initial synchronization with the remote cluster.
 	synced synced
 
-	log logrus.FieldLogger
+	log *slog.Logger
 
 	// featureMetrics will track which features are enabled with in clustermesh.
 	featureMetrics ClusterMeshMetrics
@@ -115,7 +114,7 @@ func (rc *remoteCluster) Run(ctx context.Context, backend kvstore.BackendOperati
 	if config.Capabilities.SyncedCanaries {
 		mgr = rc.storeFactory.NewWatchStoreManager(backend, rc.name)
 	} else {
-		mgr = store.NewWatchStoreManagerImmediate(rc.name)
+		mgr = store.NewWatchStoreManagerImmediate(rc.log)
 	}
 
 	adapter := func(prefix string) string { return prefix }
@@ -200,9 +199,11 @@ func (rc *remoteCluster) onUpdateConfig(newConfig cmtypes.CiliumClusterConfig) e
 	// stale entries for a Cluster ID that has already been released, potentially
 	// leading to inconsistencies if the same ID is acquired again in the meanwhile.
 	if rc.clusterID != cmtypes.ClusterIDUnset {
-		rc.log.WithField(logfields.ClusterID, newConfig.ID).
-			Info("Remote Cluster ID changed: draining all known entries before reconnecting. ",
-				"Expect connectivity disruption towards this cluster")
+		rc.log.Info(
+			"Remote Cluster ID changed: draining all known entries before reconnecting. "+
+				"Expect connectivity disruption towards this cluster",
+			logfields.ClusterID, newConfig.ID,
+		)
 		rc.remoteNodes.Drain()
 		rc.remoteServices.Drain()
 		rc.ipCacheWatcher.Drain()
@@ -236,7 +237,7 @@ func (rc *remoteCluster) ipCacheWatcherOpts(config *cmtypes.CiliumClusterConfig)
 
 type synced struct {
 	wait.SyncedCommon
-	services       *lock.StoppableWaitGroup
+	services       chan struct{}
 	nodes          chan struct{}
 	ipcache        chan struct{}
 	identities     *lock.StoppableWaitGroup
@@ -254,7 +255,7 @@ func newSynced() synced {
 
 	return synced{
 		SyncedCommon:   wait.NewSyncedCommon(),
-		services:       lock.NewStoppableWaitGroup(),
+		services:       make(chan struct{}),
 		nodes:          make(chan struct{}),
 		ipcache:        make(chan struct{}),
 		identities:     idswg,
@@ -273,7 +274,7 @@ func (s *synced) Nodes(ctx context.Context) error {
 // received from the remote cluster, and synchronized with the BPF datapath,
 // the remote cluster is disconnected, or the given context is canceled.
 func (s *synced) Services(ctx context.Context) error {
-	return s.Wait(ctx, s.services.WaitChannel())
+	return s.Wait(ctx, s.services)
 }
 
 // IPIdentities returns after that the initial list of ipcache entries and

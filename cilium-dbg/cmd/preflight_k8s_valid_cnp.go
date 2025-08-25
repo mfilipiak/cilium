@@ -6,6 +6,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/cilium/hive/cell"
@@ -19,6 +20,7 @@ import (
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
 	"github.com/cilium/cilium/pkg/k8s/client/clientset/versioned/scheme"
 	"github.com/cilium/cilium/pkg/logging"
+	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
 )
 
@@ -35,17 +37,17 @@ has an exit code 1 is returned.`,
 	hive := hive.New(
 		k8sClient.Cell,
 
-		cell.Invoke(func(lc cell.Lifecycle, clientset k8sClient.Clientset, shutdowner hive.Shutdowner) {
+		cell.Invoke(func(logger *slog.Logger, lc cell.Lifecycle, clientset k8sClient.Clientset, shutdowner hive.Shutdowner) {
 			lc.Append(cell.Hook{
-				OnStart: func(cell.HookContext) error { return validateCNPs(clientset, shutdowner) },
+				OnStart: func(cell.HookContext) error { return validateCNPs(logger, clientset, shutdowner) },
 			})
 		}),
 	)
 	hive.RegisterFlags(cmd.Flags())
 
 	cmd.Run = func(cmd *cobra.Command, args []string) {
-		if err := hive.Run(logging.DefaultSlogLogger); err != nil {
-			log.Fatal(err)
+		if err := hive.Run(log); err != nil {
+			logging.Fatal(log, err.Error())
 		}
 	}
 	return cmd
@@ -56,7 +58,7 @@ const (
 	ciliumGroup                = "cilium.io"
 )
 
-func validateCNPs(clientset k8sClient.Clientset, shutdowner hive.Shutdowner) error {
+func validateCNPs(logger *slog.Logger, clientset k8sClient.Clientset, shutdowner hive.Shutdowner) error {
 	defer shutdowner.Shutdown()
 
 	if !clientset.IsEnabled() {
@@ -64,7 +66,7 @@ func validateCNPs(clientset k8sClient.Clientset, shutdowner hive.Shutdowner) err
 			option.K8sAPIServer, option.K8sKubeConfigPath)
 	}
 
-	npValidator, err := v2_validation.NewNPValidator()
+	npValidator, err := v2_validation.NewNPValidator(logger)
 	if err != nil {
 		return err
 	}
@@ -137,10 +139,17 @@ func validateNPResources(
 				cnpName = cnp.GetName()
 			}
 			if err := validator(&cnp); err != nil {
-				log.WithField(shortName, cnpName).WithError(err).Error("Unexpected validation error")
+				log.Error("Unexpected validation error",
+					logfields.Error, err,
+					logfields.Type, shortName,
+					logfields.Name, cnpName,
+				)
 				policyErr = fmt.Errorf("Found invalid %s", shortName)
 			} else {
-				log.WithField(shortName, cnpName).Info("Validation OK!")
+				log.Info("Validation OK!",
+					logfields.Type, shortName,
+					logfields.Name, cnpName,
+				)
 			}
 		}
 		if cnps.GetContinue() == "" {

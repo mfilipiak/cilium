@@ -5,6 +5,7 @@ package slices
 
 import (
 	"cmp"
+	"iter"
 	"slices"
 )
 
@@ -23,8 +24,8 @@ func Unique[S ~[]T, T comparable](s S) S {
 
 	if len(s) < 192 {
 	Loop:
-		for i := 0; i < len(s); i++ {
-			for j := 0; j < last; j++ {
+		for i := range len(s) {
+			for j := range last {
 				if s[i] == s[j] {
 					continue Loop
 				}
@@ -34,7 +35,7 @@ func Unique[S ~[]T, T comparable](s S) S {
 		}
 	} else {
 		set := make(map[T]struct{}, len(s))
-		for i := 0; i < len(s); i++ {
+		for i := range len(s) {
 			if _, ok := set[s[i]]; ok {
 				continue
 			}
@@ -59,7 +60,7 @@ func UniqueFunc[S ~[]T, T any, K comparable](s S, key func(i int) K) S {
 	last := 0
 
 	set := make(map[K]struct{}, len(s))
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if _, ok := set[key(i)]; ok {
 			continue
 		}
@@ -142,4 +143,28 @@ func AllMatch[T any](s []T, pred func(v T) bool) bool {
 		}
 	}
 	return true
+}
+
+// Map returns a slice obtained applying fn over the input elements.
+func Map[In, Out any](in []In, fn func(In) Out) []Out {
+	if in == nil {
+		return nil
+	}
+
+	out := make([]Out, len(in))
+	for i, obj := range in {
+		out[i] = fn(obj)
+	}
+	return out
+}
+
+// MapIter returns an iterator obtained applying fn over the input elements.
+func MapIter[In, Out any](s iter.Seq[In], fn func(In) Out) iter.Seq[Out] {
+	return func(yield func(Out) bool) {
+		for obj := range s {
+			if !yield(fn(obj)) {
+				return
+			}
+		}
+	}
 }

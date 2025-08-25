@@ -7,7 +7,6 @@ import (
 	"log/slog"
 
 	"github.com/cilium/hive/cell"
-	"github.com/cilium/statedb"
 
 	"github.com/cilium/cilium/pkg/bgpv1/agent"
 	"github.com/cilium/cilium/pkg/bgpv1/agent/mode"
@@ -62,7 +61,7 @@ var Cell = cell.Module(
 		// Create a endpoints DiffStore
 		store.NewDiffStore[*k8s.Endpoints],
 		// Create a CiliumLoadBalancerIPPool store which signals the BGP CP upon each resource event.
-		store.NewBGPCPResourceStore[*v2alpha1.CiliumLoadBalancerIPPool],
+		store.NewBGPCPResourceStore[*v2.CiliumLoadBalancerIPPool],
 		// Create a CiliumPodIPPool store which signals the BGP CP upon each resource event.
 		store.NewBGPCPResourceStore[*v2alpha1.CiliumPodIPPool],
 
@@ -102,8 +101,6 @@ var Cell = cell.Module(
 		func(*agent.Controller) {},
 		// Register the bgp_metrics collector
 		bgp_metrics.RegisterCollector,
-		// Register statedb tables
-		statedb.RegisterTable[*tables.BGPReconcileError],
 	),
 
 	metrics.Metric(manager.NewBGPManagerMetrics),
@@ -125,16 +122,16 @@ func newBGPPeeringPolicyResource(lc cell.Lifecycle, c client.Clientset, dc *opti
 		), resource.WithMetric("CiliumBGPPeeringPolicy"))
 }
 
-func newLoadBalancerIPPoolResource(lc cell.Lifecycle, c client.Clientset, dc *option.DaemonConfig) resource.Resource[*v2alpha1.CiliumLoadBalancerIPPool] {
+func newLoadBalancerIPPoolResource(lc cell.Lifecycle, c client.Clientset, dc *option.DaemonConfig) resource.Resource[*v2.CiliumLoadBalancerIPPool] {
 	if !dc.BGPControlPlaneEnabled() {
 		return nil
 	}
 	if !c.IsEnabled() {
 		return nil
 	}
-	return resource.New[*v2alpha1.CiliumLoadBalancerIPPool](
-		lc, utils.ListerWatcherFromTyped[*v2alpha1.CiliumLoadBalancerIPPoolList](
-			c.CiliumV2alpha1().CiliumLoadBalancerIPPools(),
+	return resource.New[*v2.CiliumLoadBalancerIPPool](
+		lc, utils.ListerWatcherFromTyped(
+			c.CiliumV2().CiliumLoadBalancerIPPools(),
 		), resource.WithMetric("CiliumLoadBalancerIPPool"))
 }
 
