@@ -110,50 +110,58 @@ static __always_inline int
 encap_and_redirect_lxc(struct __ctx_buff *ctx, struct remote_endpoint_info *info,
 		       __u32 seclabel, __u32 dstid, const struct trace_ctx *trace, __be16 proto)
 {
-	struct tunnel_value *tunnel __maybe_unused;
-	struct bpf_tunnel_key tunnel_key __maybe_unused = {};
+	// struct tunnel_value *tunnel __maybe_unused;
+	// struct bpf_tunnel_key tunnel_key __maybe_unused = {};
+	// const __be32 tunnel_endpoint = info->tunnel_endpoint.ip4;
 
-	printk("encap_and_redirect_lxc called");
-	if (tunnel_endpoint) {
-		printk("checking if there is a tunnel_endpoint: %i", tunnel_endpoint);
-		printk("there is, encap and redir2");
-		printk("tunnel_endpoint: %i", tunnel_endpoint);
-		printk("encrypt_key: %i", encrypt_key);
-		printk("seclabel: %i", seclabel);
-		printk("dstid: %i", dstid);
-		return encap_and_redirect_with_nodeid(ctx, info, seclabel, dstid, trace, proto);
-	}
-	printk("nope: %i", dst_ip);
-	tunnel = map_lookup_elem(&TUNNEL_MAP, key);
-	if (!tunnel) {
-		__u32 key_size = sizeof(tunnel_key);
+	// printk("encap_and_redirect_lxc called");
+	// if (tunnel_endpoint) {
+	// 	printk("checking if there is a tunnel_endpoint: %i", tunnel_endpoint);
+	// 	printk("there is, encap and redir2");
+	// 	printk("tunnel_endpoint: %i", tunnel_endpoint);
+	// 	printk("encrypt_key: %i", encrypt_key);
+	// 	printk("seclabel: %i", seclabel);
+	// 	printk("dstid: %i", dstid);
+	// 	return encap_and_redirect_with_nodeid(ctx, info, seclabel, dstid, trace, proto);
+	// }
+	// printk("nope: %i", dst_ip);
+	// tunnel = map_lookup_elem(&TUNNEL_MAP, key);
+	// if (!tunnel) {
+	// 	__u32 key_size = sizeof(tunnel_key);
 
-		// note: this is 1.1.1.1
-		if(dst_ip == 50529027) {
-				printk("tunnel_endpoint: %i", tunnel_endpoint);
-				printk("encrypt_key: %i", encrypt_key);
-				printk("seclabel: %i", seclabel);
-				printk("dstid: %i", dstid);
 
-				if (unlikely(ctx_get_tunnel_key(ctx, &tunnel_key, TUNNEL_KEY_WITHOUT_SRC_IP, 0) < 0)) {
-						// TODO will it be left alone if its not there?
-						// tunnel_key = {};
-						printk("nothing set");
-				}
+	// 	//
+	// 	//
+	// 	// https://github.com/cilium/cilium/commit/9c92134e6fd49b295a291c690cb78e25ede05cf0
+	// 	//
+	// 	// TODO i think we have more information in the new info and it might help us do this lookup now
 
-				tunnel_key.tunnel_ext &= 1;
-				ctx_set_tunnel_key(ctx, &tunnel_key, key_size, BPF_F_ZERO_CSUM_TX);
+	// 	// note: this is 1.1.1.1
+	// 	if(dst_ip == 50529027) {
+	// 			printk("tunnel_endpoint: %i", tunnel_endpoint);
+	// 			printk("encrypt_key: %i", encrypt_key);
+	// 			printk("seclabel: %i", seclabel);
+	// 			printk("dstid: %i", dstid);
 
-				// TODO(refresh) this is the encoded IP of the gateway pod's node (kubectl node -o wide ip )
-				return __encap_and_redirect_lxc(ctx, 33559212,
-												encrypt_key, seclabel, dstid,
-												trace);
+	// 			if (unlikely(ctx_get_tunnel_key(ctx, &tunnel_key, TUNNEL_KEY_WITHOUT_SRC_IP, 0) < 0)) {
+	// 					// TODO will it be left alone if its not there?
+	// 					// tunnel_key = {};
+	// 					printk("nothing set");
+	// 			}
 
-		}
-		printk("drop non-tunnel endpoint");
-		return DROP_NO_TUNNEL_ENDPOINT;
-	}
-	printk("tunnel is: %u.%u.%u", (tunnel->ip4 & 0xff0000) >> 16, (tunnel->ip4 & 0xff00) >> 8, tunnel->ip4 & 0xff);
+	// 			tunnel_key.tunnel_ext &= 1;
+	// 			ctx_set_tunnel_key(ctx, &tunnel_key, key_size, BPF_F_ZERO_CSUM_TX);
+
+	// 			// TODO(refresh) this is the encoded IP of the gateway pod's node (kubectl node -o wide ip )
+	// 			return __encap_and_redirect_lxc(ctx, 33559212,
+	// 											encrypt_key, seclabel, dstid,
+	// 											trace);
+
+	// 	}
+	// 	printk("drop non-tunnel endpoint");
+	// 	return DROP_NO_TUNNEL_ENDPOINT;
+	// }
+	// printk("tunnel is: %u.%u.%u", (tunnel->ip4 & 0xff0000) >> 16, (tunnel->ip4 & 0xff00) >> 8, tunnel->ip4 & 0xff);
 	return encap_and_redirect_with_nodeid(ctx, info, seclabel, dstid, trace, proto);
 }
 #endif /* TUNNEL_MODE */

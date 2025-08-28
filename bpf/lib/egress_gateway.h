@@ -81,7 +81,7 @@ int egress_gw_fib_lookup_and_redirect(struct __ctx_buff *ctx, __be32 egress_ip, 
 
 	/* Skip redirect in to-netdev if we stay on the same iface: */
 	printk("checking if we're staying on the same interface");
-	if (is_defined(IS_BPF_HOST) && oif == ctx_get_ifindex(ctx))
+	if (is_defined(IS_BPF_HOST) && oif == ctx_get_ifindex(ctx)) {
 		return CTX_ACT_OK;
 	}
 

@@ -1405,7 +1405,8 @@ static __always_inline int __tail_handle_ipv4(struct __ctx_buff *ctx,
 	void *data, *data_end;
 	struct iphdr *ip4;
 	fraginfo_t fraginfo __maybe_unused;
-	bool from_l7lb = false;
+	// TODO commenting out because it is unused and erroring out
+	// bool from_l7lb = false;
 
 	if (!revalidate_data_pull(ctx, &data, &data_end, &ip4))
 		return DROP_INVALID;

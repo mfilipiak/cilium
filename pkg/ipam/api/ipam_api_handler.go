@@ -18,8 +18,6 @@ import (
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	"github.com/cilium/cilium/pkg/ipam"
-	"github.com/cilium/cilium/pkg/logging"
-	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/time"
 )
@@ -38,10 +36,6 @@ type IpamPostIpamIPHandler struct {
 	IPAM *ipam.IPAM
 }
 
-var (
-	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "ipam_api_handler")
-)
-
 func (r *IpamPostIpamHandler) Handle(params ipamapi.PostIpamParams) middleware.Responder {
 	family := strings.ToLower(swag.StringValue(params.Family))
 	owner := swag.StringValue(params.Owner)
@@ -51,7 +45,7 @@ func (r *IpamPostIpamHandler) Handle(params ipamapi.PostIpamParams) middleware.R
 		expirationTimeout = defaults.IPAMExpiration
 	}
 	ipv4Result, ipv6Result, err := r.IPAM.AllocateNextWithExpiration(family, owner, pool, expirationTimeout)
-	log.Debugf("==> Handle allocate, %v, %v, %v", ipv4Result.GatewayIP, ipv4Result.IP, family)
+	slog.Debug(fmt.Sprintf("==> Handle allocate, %v, %v, %v", ipv4Result.GatewayIP, ipv4Result.IP, family))
 	if err != nil {
 		return api.Error(ipamapi.PostIpamFailureCode, err)
 	}
@@ -61,8 +55,8 @@ func (r *IpamPostIpamHandler) Handle(params ipamapi.PostIpamParams) middleware.R
 		Address:        &models.AddressPair{},
 	}
 
-	log.Debugf("==> owner %v", owner)
-	log.Debugf("==> HostAddressing %v", resp.HostAddressing.IPV4.IP)
+	slog.Debug(fmt.Sprintf("==> owner %v", owner))
+	slog.Debug(fmt.Sprintf("==> HostAddressing %v", resp.HostAddressing.IPV4.IP))
 	if strings.HasPrefix(owner, "default/netshoot") {
 		// TODO(refresh) this is the ip of stc-far-proxy
 		// we would also need to fix the ARP response that is in bpf_lxc.c:tail_handle_arp
